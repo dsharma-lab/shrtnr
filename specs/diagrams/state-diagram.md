@@ -1,5 +1,7 @@
 # State Diagram: Link Lifecycle
 
+## State Transitions & Business Rules
+
 ```mermaid
 stateDiagram-v2
     [*] --> ACTIVE: POST /v1/links
@@ -27,7 +29,6 @@ stateDiagram-v2
     }
 ```
 
-## State Transitions & Business Rules
 
 ### ACTIVE State
 **Entry Conditions:**
@@ -44,7 +45,7 @@ stateDiagram-v2
 - ✓ User deletes link → transition to DELETED
 
 **HTTP Behaviors in ACTIVE:**
-- GET /:shortCode → HTTP 301 with Location header (redirect)
+- GET /r/:shortCode → HTTP 307 with Location header (redirect)
 - GET /v1/links/:shortCode → HTTP 200 (link details)
 - PATCH /v1/links/:shortCode → HTTP 200 (update)
 - DELETE /v1/links/:shortCode → HTTP 204 (delete)
@@ -101,11 +102,11 @@ Timeline: Link created with expiresAt = 2025-06-30
 
 [2024-04-18 10:05] User accesses link
                    State: ACTIVE
-                   HTTP 301 redirect + click recorded
+                   HTTP 307 redirect + click recorded
 
 [2024-06-29 23:59] User accesses link (1 day before expiry)
                    State: ACTIVE
-                   HTTP 301 redirect + click recorded
+                   HTTP 307 redirect + click recorded
 
 [2024-06-30 00:00] Link expires (automatic)
                    State: ACTIVE → EXPIRED (triggered on next access)
@@ -137,3 +138,4 @@ SELECT * FROM Link WHERE isDeleted=true
 -- Check if link is accessible
 SELECT * FROM Link WHERE shortCode='abc123' AND isDeleted=false AND (expiresAt IS NULL OR expiresAt > NOW())
 ```
+
