@@ -23,6 +23,9 @@ const envVarsSchema = Joi.object()
     SMTP_USERNAME: Joi.string().description('username for email server'),
     SMTP_PASSWORD: Joi.string().description('password for email server'),
     EMAIL_FROM: Joi.string().description('the from field in the emails sent by the app'),
+    THREAT_API_URL: Joi.string().uri().optional().description('Threat intelligence API endpoint'),
+    THREAT_API_KEY: Joi.string().optional().description('Threat intelligence API key'),
+    BASE_URL: Joi.string().uri().default('http://localhost:3000').description('Public base URL for short links'),
   })
   .unknown();
 
@@ -41,6 +44,7 @@ module.exports = {
       useCreateIndex: true,
       useNewUrlParser: true,
       useUnifiedTopology: true,
+      useFindAndModify: false,
     },
   },
   jwt: {
@@ -61,4 +65,9 @@ module.exports = {
     },
     from: envVars.EMAIL_FROM,
   },
+  // REQ-004: threat intelligence API config (fail-closed)
+  threatApiUrl: envVars.THREAT_API_URL || '',
+  threatApiKey: envVars.THREAT_API_KEY || '',
+  // REQ-001, REQ-002: base URL for constructing shortUrl in responses
+  baseUrl: envVars.BASE_URL,
 };

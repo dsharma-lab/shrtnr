@@ -11,6 +11,7 @@ const morgan = require('./config/morgan');
 const { jwtStrategy } = require('./config/passport');
 const { authLimiter } = require('./middlewares/rateLimiter');
 const routes = require('./routes/v1');
+const redirectRoute = require('./routes/redirect.route');
 const { errorConverter, errorHandler } = require('./middlewares/error');
 const ApiError = require('./utils/ApiError');
 
@@ -49,6 +50,9 @@ passport.use('jwt', jwtStrategy);
 if (config.env === 'production') {
   app.use('/v1/auth', authLimiter);
 }
+
+// REQ-002: public redirect route must be registered before /v1 to avoid prefix conflicts
+app.use('/r', redirectRoute);
 
 // v1 api routes
 app.use('/v1', routes);

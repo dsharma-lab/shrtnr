@@ -1,0 +1,1300 @@
+feature_id: FEAT-001
+
+# ─────────────────────────────────────────────────────────────────
+# COMPONENTS  (one entry per file to create or modify)
+# ─────────────────────────────────────────────────────────────────
+components:
+
+  # ── Models ──────────────────────────────────────────────────────
+
+  - name: "Link Model"
+    layer: models
+    file_path: "src/models/link.model.js"
+    action: create
+    changes_required: |
+      Create Mongoose schema with timestamps:true. Fields:
+        shortCode     String  required, unique, minlength 3, maxlength 20, index
+        originalUrl   String  required, maxlength 2048
+        urlHash       String  required  (SHA-256 of normalised URL — not exposed in API via toJSON)
+        userId        ObjectId  required, ref User, index
+        title         String  optional, maxlength 255
+        tags          [String]  optional, max 10 items
+        customDescription  String  optional, maxlength 500
+        isDeleted     Boolean  default false, index
+        clickCount    Number   default 0, min 0
+        lastAccessedAt  Date   optional
+        expiresAt     Date   optional, sparse index
+      Indexes:
+        unique({ shortCode: 1 })
+        unique({ urlHash: 1, userId: 1 })  — per-user duplicate detection
+        { userId: 1 }
+        { expiresAt: 1 }, sparse: true
+        { isDeleted: 1 }
+      Apply toJSON plugin (hides urlHash, __v; maps _id→id) and paginate plugin.
+    req_ids: ["REQ-001", "REQ-005", "REQ-006", "REQ-008", "REQ-011"]
+
+  - name: "Click Model"
+    layer: models
+    file_path: "src/models/click.model.js"
+    action: create
+    changes_required: |
+      Create Mongoose schema (no timestamps plugin — timestamp field is explicit). Fields:
+        linkId              ObjectId  required, ref Link, index
+        timestamp           Date      default Date.now, index
+        referrer            String    optional, maxlength 2048
+        userAgent           String    optional, maxlength 512
+        ipAddressAnonymized String    optional, maxlength 45
+        countryCode         String    optional, maxlength 2
+        deviceType          String    enum [Desktop, Mobile, Tablet, Unknown], default Unknown
+        browserName         String    optional, maxlength 64
+      Indexes:
+        { linkId: 1, timestamp: -1 }  — analytics range queries
+        { timestamp: -1 }             — global time-range queries
+      Apply toJSON plugin.
+    req_ids: ["REQ-006"]
+
+  - name: "BulkImportJob Model"
+    layer: models
+    file_path: "src/models/bulkImportJob.model.js"
+    action: create
+    changes_required: |
+      Create Mongoose schema with timestamps:true. Fields:
+        userId        ObjectId  required, ref User, index
+        status        String    enum [queued, processing, completed, failed], default queued, index
+        totalRows     Number    required, min 1
+        successCount  Number    default 0, min 0
+        failureCount  Number    default 0, min 0
+        failedRows    [{ rowIndex: Number, originalUrl: String, reason: String }]  optional
+        startedAt     Date      optional
+        completedAt   Date      optional
+      Index: { userId: 1, status: 1 }
+      Apply toJSON plugin.
+    req_ids: ["REQ-012"]
+
+  - name: "Models index"
+    layer: models
+    file_path: "src/models/index.js"
+    action: modify
+    changes_required: |
+      Export Link, Click, and BulkImportJob alongside existing User and Token exports.
+        module.exports.Link = require('./link.model');
+        module.exports.Click = require('./click.model');
+        module.exports.BulkImportJob = require('./bulkImportJob.model');
+    req_ids: ["REQ-001", "REQ-006", "REQ-012"]
+
+  # ── Utils ────────────────────────────────────────────────────────
+
+  - name: "URL Normalizer Utility"
+    layer: utils
+    file_path: "src/utils/urlNormalizer.js"
+    action: create
+    changes_required: |
+      normalizeUrl(url: string): string
+        1. Parse with Node.js built-in `new URL(url)` — throws if malformed.
+        2. Accept only protocol http: or https:; throw ApiError(400, 'Unsupported protocol') otherwise.
+        3. Lowercase protocol and hostname.
+        4. Remove default ports (80 for http, 443 for https).
+        5. Sort query-string parameters alphabetically.
+        6. Remove URL fragment (#...).
+        7. Return normalized URL string.
+        Throws ApiError(400, 'Invalid URL format') on parse error.
+
+      computeUrlHash(normalizedUrl: string): string
+        Returns crypto.createHash('sha256').update(normalizedUrl).digest('hex').
+    req_ids: ["REQ-003", "REQ-005"]
+
+  - name: "Short Code Generator"
+    layer: utils
+    file_path: "src/utils/shortCode.js"
+    action: create
+    changes_required: |
+      generateShortCode(): string
+        Uses nanoid (URL-safe alphabet A-Za-z0-9_-), length 8.
+
+      validateShortCode(code: string): boolean
+        Returns true iff: length 3-20, chars match /^[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]$/.
+        (Implicitly forbids leading/trailing hyphens; codes of exactly 1 char fail the regex.)
+
+      RESERVED_CODES: string[]  (exported constant)
+        ['admin','api','www','help','about','contact','login','logout','signup','register',
+         'dashboard','settings','profile','account','static','assets','v1','v2','r',
+         'docs','swagger','auth','users','health']
+
+      isReservedCode(code: string): boolean
+        Returns true if code.toLowerCase() is in RESERVED_CODES OR matches /^(.)\1+$/ (all-same-char).
+    req_ids: ["REQ-001", "REQ-009"]
+
+  - name: "Threat Check Utility"
+    layer: utils
+    file_path: "src/utils/threatCheck.js"
+    action: create
+    changes_required: |
+      checkUrlThreat(url: string): Promise<{ isMalicious: boolean, reason: string|null }>
+        POSTs to config.threatApiUrl with Authorization: Bearer config.threatApiKey.
+        Timeout: 5000 ms.
+        On HTTP 2xx response: parse { isMalicious, reason } from response body.
+        On HTTP 4xx/5xx OR network error OR timeout: throw ApiError(503,
+          'Threat check service unavailable. Please try again later.').
+        Fail-closed: any exception propagates as 503, never allows the URL through.
+      Depends on axios. Reads config.threatApiUrl and config.threatApiKey.
+    req_ids: ["REQ-004"]
+
+  - name: "QR Code Utility"
+    layer: utils
+    file_path: "src/utils/qrCode.js"
+    action: create
+    changes_required: |
+      generateQRCode(url: string, format: 'png'|'svg'): Promise<Buffer|string>
+        Uses 'qrcode' npm package.
+        format 'png': return QRCode.toBuffer(url)  → Buffer
+        format 'svg': return QRCode.toString(url, { type: 'svg' })  → string
+        Throws ApiError(400, 'Unsupported format. Use png or svg.') for any other format.
+    req_ids: ["REQ-014"]
+
+  # ── Validations ──────────────────────────────────────────────────
+
+  - name: "Link Validation Schemas"
+    layer: validations
+    file_path: "src/validations/link.validation.js"
+    action: create
+    changes_required: |
+      Export Joi validation objects (compatible with existing validate middleware):
+
+      createLink: {
+        body: Joi.object({
+          originalUrl:       Joi.string().uri({ scheme: ['http','https'] }).max(2048).required(),
+          customCode:        Joi.string().min(3).max(20)
+                               .pattern(/^[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]$/).optional(),
+          expiresAt:         Joi.date().iso().greater('now').optional(),
+          title:             Joi.string().max(255).optional(),
+          tags:              Joi.array().items(Joi.string().max(50)).max(10).optional(),
+          customDescription: Joi.string().max(500).optional(),
+        })
+      }
+
+      updateLink: {
+        params: Joi.object({ shortCode: Joi.string().min(3).max(20).required() }),
+        body: Joi.object({
+          expiresAt:         Joi.date().iso().greater('now').optional(),
+          title:             Joi.string().max(255).optional(),
+          tags:              Joi.array().items(Joi.string().max(50)).max(10).optional(),
+          customDescription: Joi.string().max(500).optional(),
+        }).min(1)   // at least one field required
+      }
+
+      shortCodeParam: {
+        params: Joi.object({ shortCode: Joi.string().min(3).max(20).required() })
+      }
+
+      listUserLinks: {
+        query: Joi.object({
+          page:   Joi.number().integer().min(1).default(1),
+          limit:  Joi.number().integer().min(1).max(100).default(20),
+          sortBy: Joi.string().optional(),
+          search: Joi.string().max(200).optional(),
+        })
+      }
+
+      getLinkAnalytics: {
+        params: Joi.object({ shortCode: Joi.string().min(3).max(20).required() }),
+        query: Joi.object({
+          startDate: Joi.date().iso().optional(),
+          endDate:   Joi.date().iso().optional(),
+          page:      Joi.number().integer().min(1).default(1),
+          limit:     Joi.number().integer().min(1).max(100).default(20),
+        })
+      }
+
+      exportAnalytics: {
+        params: Joi.object({ shortCode: Joi.string().min(3).max(20).required() }),
+        query: Joi.object({
+          startDate: Joi.date().iso().optional(),
+          endDate:   Joi.date().iso().optional(),
+        })
+      }
+
+      bulkImport: {
+        body: Joi.object({
+          urls: Joi.array().items(
+            Joi.object({
+              originalUrl:       Joi.string().uri({ scheme: ['http','https'] }).max(2048).required(),
+              customCode:        Joi.string().min(3).max(20).optional(),
+              expiresAt:         Joi.date().iso().greater('now').optional(),
+              title:             Joi.string().max(255).optional(),
+              tags:              Joi.array().items(Joi.string().max(50)).max(10).optional(),
+              customDescription: Joi.string().max(500).optional(),
+            })
+          ).min(1).max(1000).required()
+        })
+      }
+
+      getQRCode: {
+        params: Joi.object({ shortCode: Joi.string().min(3).max(20).required() }),
+        query: Joi.object({ format: Joi.string().valid('png','svg').default('png') })
+      }
+    req_ids: ["REQ-001", "REQ-003", "REQ-008", "REQ-009", "REQ-011", "REQ-012", "REQ-014"]
+
+  - name: "Validations index"
+    layer: validations
+    file_path: "src/validations/index.js"
+    action: modify
+    changes_required: |
+      Add: module.exports.linkValidation = require('./link.validation');
+    req_ids: ["REQ-001"]
+
+  # ── Services ─────────────────────────────────────────────────────
+
+  - name: "Link Service"
+    layer: services
+    file_path: "src/services/link.service.js"
+    action: create
+    changes_required: |
+      Implements all link business logic (no HTTP objects):
+
+      createLink(userId, body):
+        1. normalizeUrl(body.originalUrl)
+        2. computeUrlHash(normalizedUrl)
+        3. Query Link.findOne({ urlHash, userId, isDeleted: false })
+           → if found: throw ApiError(409, 'URL already shortened', { existingShortCode })
+        4. await checkUrlThreat(normalizedUrl)
+           → if isMalicious: throw ApiError(422, `URL flagged as malicious. Reason: ${reason}`)
+           → if 503: propagate
+        5. Resolve shortCode:
+           a. If body.customCode provided:
+              - validateShortCode → throw ApiError(400, 'Invalid short code format')
+              - isReservedCode → throw ApiError(400, 'Short code is reserved. Choose another.')
+              - Link.findOne({ shortCode }) → throw ApiError(409, 'Short code already taken')
+           b. Otherwise: retry generateShortCode() up to 5 times until unique
+        6. Link.create({ shortCode, originalUrl, urlHash, userId, expiresAt, title, tags, customDescription })
+        7. Return saved Link document.
+
+      getLinkByShortCode(shortCode):
+        Link.findOne({ shortCode })
+        → null: throw ApiError(404, 'Short URL not found')
+        → isDeleted: throw ApiError(404, 'Short URL not found')
+        → expiresAt && expiresAt < now: throw ApiError(410, 'Link has expired')
+        → return Link
+
+      getLinkDetails(shortCode, userId):
+        Link.findOne({ shortCode })
+        → null or isDeleted: throw ApiError(404, 'Link not found')
+        → link.userId != userId: throw ApiError(403, 'You do not have permission to access this resource.')
+        → return Link
+
+      listUserLinks(userId, { page, limit, sortBy, search }):
+        Build filter = { userId, isDeleted: false }
+        If search: add $or: [{ originalUrl: regex }, { title: regex }]
+        Link.paginate(filter, { page, limit, sortBy, populate: '' })
+        Return PaginateResult
+
+      updateLink(shortCode, userId, updates):
+        getLinkDetails(shortCode, userId)  (enforces ownership + 404)
+        If updates.expiresAt && updates.expiresAt <= now: throw ApiError(400, 'expiresAt must be a future date')
+        Link.findOneAndUpdate({ shortCode }, { $set: updates }, { new: true })
+        Return updated Link
+
+      deleteLink(shortCode, userId):
+        getLinkDetails(shortCode, userId)
+        Link.findOneAndUpdate({ shortCode }, { $set: { isDeleted: true } })
+
+      getLinkAnalytics(shortCode, userId, { startDate, endDate, page, limit }):
+        getLinkDetails(shortCode, userId)
+        Build Click filter = { linkId: link._id }
+        If startDate/endDate: add timestamp range
+        Click.paginate(filter, { page, limit, sort: { timestamp: -1 } })
+        Return { shortCode, totalClicks: link.clickCount, clicks: result }
+
+      exportAnalyticsCSV(shortCode, userId, { startDate, endDate }):
+        getLinkDetails(shortCode, userId)
+        clicks = await Click.find(filter).sort({ timestamp: 1 }).lean()
+        Build CSV string using JSON→CSV mapping
+        Return csv string
+    req_ids: ["REQ-001", "REQ-003", "REQ-004", "REQ-005", "REQ-007", "REQ-008", "REQ-009", "REQ-011", "REQ-013"]
+
+  - name: "Click Service"
+    layer: services
+    file_path: "src/services/click.service.js"
+    action: create
+    changes_required: |
+      recordClick(linkId, { referrer, userAgent, ip }):
+        1. Anonymize IP:
+           IPv4: replace last octet with 0  (192.168.1.42 → 192.168.1.0)
+           IPv6: replace last 80 bits with 0 using the ipaddr.js library
+        2. Parse userAgent with 'ua-parser-js':
+           deviceType = result.device.type mapped to [Desktop, Mobile, Tablet, Unknown]
+           browserName = result.browser.name || 'Unknown'
+        3. await Click.create({ linkId, referrer, userAgent, ipAddressAnonymized, deviceType, browserName })
+        4. Link.findByIdAndUpdate(linkId, { $inc: { clickCount: 1 }, $set: { lastAccessedAt: new Date() } })
+           (both operations are awaited for data integrity, but the redirect controller does not await recordClick)
+    req_ids: ["REQ-006"]
+
+  - name: "Bulk Import Service"
+    layer: services
+    file_path: "src/services/bulkImport.service.js"
+    action: create
+    changes_required: |
+      bulkImportLinks(userId, rows):
+        1. job = await BulkImportJob.create({ userId, status: 'processing', totalRows: rows.length, startedAt: new Date() })
+        2. For each row (index i):
+           try { link = await linkService.createLink(userId, row); job.successCount++ }
+           catch (err) { job.failureCount++; job.failedRows.push({ rowIndex: i, originalUrl: row.originalUrl, reason: err.message }) }
+        3. job.status = 'completed'; job.completedAt = new Date(); await job.save()
+        4. Return job
+
+      getBulkImportJob(jobId, userId):
+        job = await BulkImportJob.findById(jobId)
+        → null: throw ApiError(404, 'Job not found')
+        → job.userId != userId: throw ApiError(403, 'Forbidden')
+        → return job
+    req_ids: ["REQ-012"]
+
+  - name: "Services index"
+    layer: services
+    file_path: "src/services/index.js"
+    action: modify
+    changes_required: |
+      Add:
+        module.exports.linkService = require('./link.service');
+        module.exports.clickService = require('./click.service');
+        module.exports.bulkImportService = require('./bulkImport.service');
+    req_ids: ["REQ-001", "REQ-006", "REQ-012"]
+
+  # ── Middlewares ──────────────────────────────────────────────────
+
+  - name: "Rate Limiter middleware"
+    layer: middlewares
+    file_path: "src/middlewares/rateLimiter.js"
+    action: modify
+    changes_required: |
+      Add linkCreationLimiter using express-rate-limit:
+        windowMs: 60 * 60 * 1000    // 1 hour
+        max: 100
+        keyGenerator: (req) => req.user.id   // per-user, not per-IP
+        handler: (req, res) => {
+          const retryAfter = Math.ceil((req.rateLimit.resetTime - Date.now()) / 1000);
+          res.setHeader('Retry-After', retryAfter);
+          res.status(429).json({
+            code: 429,
+            message: `Rate limit exceeded. You can create 100 links per hour. Try again in ${retryAfter} seconds.`
+          });
+        }
+      Export linkCreationLimiter alongside any existing limiters.
+    req_ids: ["REQ-010"]
+
+  # ── Controllers ──────────────────────────────────────────────────
+
+  - name: "Link Controller"
+    layer: controllers
+    file_path: "src/controllers/link.controller.js"
+    action: create
+    changes_required: |
+      All handlers wrapped with catchAsync. Import linkService, bulkImportService, generateQRCode from utils.
+      BASE_URL = config.baseUrl  (e.g., 'https://shrtnr.io')
+
+      createLink: POST /v1/links
+        const link = await linkService.createLink(req.user.id, req.body);
+        res.status(201).json(formatLink(link, BASE_URL));
+
+      listUserLinks: GET /v1/links
+        const options = pick(req.query, ['page','limit','sortBy','search']);
+        const result = await linkService.listUserLinks(req.user.id, options);
+        res.json({ ...result, results: result.results.map(l => formatLink(l, BASE_URL)) });
+
+      getLinkDetails: GET /v1/links/:shortCode
+        const link = await linkService.getLinkDetails(req.params.shortCode, req.user.id);
+        res.json(formatLink(link, BASE_URL));
+
+      updateLink: PATCH /v1/links/:shortCode
+        const link = await linkService.updateLink(req.params.shortCode, req.user.id, req.body);
+        res.json(formatLink(link, BASE_URL));
+
+      deleteLink: DELETE /v1/links/:shortCode
+        await linkService.deleteLink(req.params.shortCode, req.user.id);
+        res.status(204).send();
+
+      getLinkAnalytics: GET /v1/links/:shortCode/analytics
+        const result = await linkService.getLinkAnalytics(req.params.shortCode, req.user.id, pick(req.query, ['startDate','endDate','page','limit']));
+        res.json(result);
+
+      exportAnalytics: GET /v1/links/:shortCode/analytics/export
+        const csv = await linkService.exportAnalyticsCSV(req.params.shortCode, req.user.id, pick(req.query, ['startDate','endDate']));
+        const filename = `analytics-${req.params.shortCode}-${new Date().toISOString().split('T')[0]}.csv`;
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(csv);
+
+      bulkImport: POST /v1/links/bulk
+        const job = await bulkImportService.bulkImportLinks(req.user.id, req.body.urls);
+        res.status(202).json({ jobId: job.id, status: job.status, totalRows: job.totalRows,
+          message: `Bulk import queued. Poll GET /v1/links/bulk/${job.id} for status.` });
+
+      getBulkImportStatus: GET /v1/links/bulk/:jobId
+        const job = await bulkImportService.getBulkImportJob(req.params.jobId, req.user.id);
+        res.json(job);
+
+      getQRCode: GET /v1/links/:shortCode/qr
+        const { format = 'png' } = req.query;
+        const link = await linkService.getLinkByShortCode(req.params.shortCode);
+        const shortUrl = `${BASE_URL}/r/${link.shortCode}`;
+        const data = await generateQRCode(shortUrl, format);
+        const contentType = format === 'svg' ? 'image/svg+xml' : 'image/png';
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Content-Disposition', `attachment; filename="qr-${link.shortCode}.${format}"`);
+        res.send(data);
+
+      Helper: formatLink(link, baseUrl) returns plain object with shortUrl = `${baseUrl}/r/${link.shortCode}`.
+    req_ids: ["REQ-001", "REQ-006", "REQ-007", "REQ-008", "REQ-009", "REQ-011", "REQ-012", "REQ-013", "REQ-014"]
+
+  - name: "Redirect Controller"
+    layer: controllers
+    file_path: "src/controllers/redirect.controller.js"
+    action: create
+    changes_required: |
+      redirectLink = catchAsync(async (req, res) => {
+        const link = await linkService.getLinkByShortCode(req.params.shortCode);
+        // Non-blocking analytics: do not await
+        clickService.recordClick(link.id, {
+          referrer:  req.headers.referer || req.headers.referrer || '',
+          userAgent: req.headers['user-agent'] || '',
+          ip:        req.ip,
+        }).catch(() => {});   // silently swallow analytics errors
+        res.redirect(307, link.originalUrl);
+      });
+    req_ids: ["REQ-002", "REQ-006", "REQ-008"]
+
+  - name: "Controllers index"
+    layer: controllers
+    file_path: "src/controllers/index.js"
+    action: modify
+    changes_required: |
+      Add:
+        module.exports.linkController = require('./link.controller');
+        module.exports.redirectController = require('./redirect.controller');
+    req_ids: ["REQ-001", "REQ-002"]
+
+  # ── Routes ───────────────────────────────────────────────────────
+
+  - name: "Link Routes"
+    layer: routes
+    file_path: "src/routes/v1/link.route.js"
+    action: create
+    changes_required: |
+      const router = express.Router();
+      const { linkController } = require('../../controllers');
+      const { linkValidation } = require('../../validations');
+      const auth = require('../../middlewares/auth');
+      const validate = require('../../middlewares/validate');
+      const { linkCreationLimiter } = require('../../middlewares/rateLimiter');
+
+      // Bulk routes BEFORE /:shortCode to avoid param shadowing
+      router.post('/bulk', auth(), linkController.bulkImport);
+      router.get('/bulk/:jobId', auth(), linkController.getBulkImportStatus);
+
+      router.post('/', auth(), linkCreationLimiter, validate(linkValidation.createLink), linkController.createLink);
+      router.get('/', auth(), validate(linkValidation.listUserLinks), linkController.listUserLinks);
+
+      router.get('/:shortCode/analytics/export', auth(), validate(linkValidation.exportAnalytics), linkController.exportAnalytics);
+      router.get('/:shortCode/analytics', auth(), validate(linkValidation.getLinkAnalytics), linkController.getLinkAnalytics);
+      router.get('/:shortCode/qr', validate(linkValidation.getQRCode), linkController.getQRCode);
+
+      router.get('/:shortCode', auth(), validate(linkValidation.shortCodeParam), linkController.getLinkDetails);
+      router.patch('/:shortCode', auth(), validate(linkValidation.updateLink), linkController.updateLink);
+      router.delete('/:shortCode', auth(), validate(linkValidation.shortCodeParam), linkController.deleteLink);
+
+      module.exports = router;
+    req_ids: ["REQ-001", "REQ-007", "REQ-009", "REQ-010", "REQ-011", "REQ-012", "REQ-013", "REQ-014"]
+
+  - name: "Redirect Route"
+    layer: routes
+    file_path: "src/routes/redirect.route.js"
+    action: create
+    changes_required: |
+      const router = express.Router();
+      const { redirectController } = require('../controllers');
+      router.get('/:shortCode', redirectController.redirectLink);
+      module.exports = router;
+      Note: registered at /r (not /v1/r) in app.js.
+    req_ids: ["REQ-002"]
+
+  - name: "Routes v1 index"
+    layer: routes
+    file_path: "src/routes/v1/index.js"
+    action: modify
+    changes_required: |
+      Add: router.use('/links', require('./link.route'));
+      The /r redirect route is registered in app.js (not here) to avoid the /v1 prefix.
+    req_ids: ["REQ-001"]
+
+  - name: "Express app setup"
+    layer: middlewares
+    file_path: "src/app.js"
+    action: modify
+    changes_required: |
+      1. Import redirectRoute: const redirectRoute = require('./routes/redirect.route');
+      2. Register BEFORE the v1 router: app.use('/r', redirectRoute);
+      3. Confirm express.json() limit is at least '10mb' to support bulk import payloads.
+    req_ids: ["REQ-002", "REQ-012"]
+
+  - name: "Config"
+    layer: middlewares
+    file_path: "src/config/config.js"
+    action: modify
+    changes_required: |
+      Add to the config object:
+        threatApiUrl: process.env.THREAT_API_URL || '',
+        threatApiKey:  process.env.THREAT_API_KEY || '',
+        baseUrl:       process.env.BASE_URL || 'http://localhost:3000',
+      Update .env.example to document THREAT_API_URL, THREAT_API_KEY, BASE_URL.
+    req_ids: ["REQ-004"]
+
+# ─────────────────────────────────────────────────────────────────
+# DATA MODELS
+# ─────────────────────────────────────────────────────────────────
+data_models:
+
+  - model_name: Link
+    file_path: "src/models/link.model.js"
+    fields:
+      - name: shortCode
+        type: String
+        constraints: "required, unique, minlength 3, maxlength 20, index"
+      - name: originalUrl
+        type: String
+        constraints: "required, maxlength 2048"
+      - name: urlHash
+        type: String
+        constraints: "required; compound unique index with userId; hidden from API via toJSON plugin"
+      - name: userId
+        type: ObjectId
+        constraints: "required, ref: User, index"
+      - name: title
+        type: String
+        constraints: "optional, maxlength 255"
+      - name: tags
+        type: "[String]"
+        constraints: "optional, max 10 items per array"
+      - name: customDescription
+        type: String
+        constraints: "optional, maxlength 500"
+      - name: isDeleted
+        type: Boolean
+        constraints: "default false, index"
+      - name: clickCount
+        type: Number
+        constraints: "default 0, min 0"
+      - name: lastAccessedAt
+        type: Date
+        constraints: "optional"
+      - name: expiresAt
+        type: Date
+        constraints: "optional, sparse index"
+      - name: createdAt
+        type: Date
+        constraints: "auto-managed via timestamps: true"
+      - name: updatedAt
+        type: Date
+        constraints: "auto-managed via timestamps: true"
+    hooks:
+      - "Apply toJSON plugin (hides urlHash and __v; maps _id → id)"
+      - "Apply paginate plugin (adds Link.paginate() static method)"
+      - "Compound unique index: { urlHash: 1, userId: 1 }, unique: true — prevents same user from shortening same URL twice"
+
+  - model_name: Click
+    file_path: "src/models/click.model.js"
+    fields:
+      - name: linkId
+        type: ObjectId
+        constraints: "required, ref: Link, index"
+      - name: timestamp
+        type: Date
+        constraints: "default Date.now, index"
+      - name: referrer
+        type: String
+        constraints: "optional, maxlength 2048"
+      - name: userAgent
+        type: String
+        constraints: "optional, maxlength 512"
+      - name: ipAddressAnonymized
+        type: String
+        constraints: "optional, maxlength 45 (IPv6 max length)"
+      - name: countryCode
+        type: String
+        constraints: "optional, maxlength 2"
+      - name: deviceType
+        type: String
+        constraints: "enum: [Desktop, Mobile, Tablet, Unknown], default: Unknown"
+      - name: browserName
+        type: String
+        constraints: "optional, maxlength 64"
+    hooks:
+      - "Apply toJSON plugin"
+      - "Compound index: { linkId: 1, timestamp: -1 } for analytics range queries"
+      - "Index: { timestamp: -1 } for global time-range queries"
+
+  - model_name: BulkImportJob
+    file_path: "src/models/bulkImportJob.model.js"
+    fields:
+      - name: userId
+        type: ObjectId
+        constraints: "required, ref: User, index"
+      - name: status
+        type: String
+        constraints: "enum: [queued, processing, completed, failed], default: queued, index"
+      - name: totalRows
+        type: Number
+        constraints: "required, min 1"
+      - name: successCount
+        type: Number
+        constraints: "default 0, min 0"
+      - name: failureCount
+        type: Number
+        constraints: "default 0, min 0"
+      - name: failedRows
+        type: "[{ rowIndex: Number, originalUrl: String, reason: String }]"
+        constraints: "optional; tracks per-row failure details"
+      - name: startedAt
+        type: Date
+        constraints: "optional; set when processing begins"
+      - name: completedAt
+        type: Date
+        constraints: "optional; set when job finishes"
+      - name: createdAt
+        type: Date
+        constraints: "auto-managed via timestamps: true"
+    hooks:
+      - "Apply toJSON plugin"
+      - "Compound index: { userId: 1, status: 1 } for job lookup by owner"
+
+# ─────────────────────────────────────────────────────────────────
+# API CONTRACT
+# ─────────────────────────────────────────────────────────────────
+api_contract:
+
+  - method: POST
+    path: "/v1/links"
+    auth_required:
+      type: jwt
+      roles: []
+    request_body:
+      content_type: "application/json"
+      schema: |
+        {
+          originalUrl:       string (URI, required, max 2048 chars),
+          customCode:        string (optional, 3-20 chars, alphanumeric+hyphens, no leading/trailing hyphens),
+          expiresAt:         datetime ISO8601 (optional, must be future),
+          title:             string (optional, max 255),
+          tags:              string[] (optional, max 10 items),
+          customDescription: string (optional, max 500)
+        }
+    response:
+      status_201: "{ id, shortCode, shortUrl, originalUrl, title, tags, customDescription, expiresAt, createdAt, clickCount: 0 }"
+      status_400: "{ code: 400, message: 'Invalid URL format' | 'expiresAt must be a future date' | 'Short code is reserved. Choose another.' | 'Invalid short code format' }"
+      status_401: "{ code: 401, message: 'Please authenticate' }"
+      status_409: "{ code: 409, message: 'URL already shortened', existingShortCode: 'abc123' } | { code: 409, message: 'Short code already taken' }"
+      status_422: "{ code: 422, message: 'URL flagged as malicious. Reason: phishing attempt. Contact support if this is incorrect.' }"
+      status_429: "{ code: 429, message: 'Rate limit exceeded. You can create 100 links per hour. Try again in X seconds.' } + Retry-After header"
+      status_503: "{ code: 503, message: 'Threat check service unavailable. Please try again later.' }"
+
+  - method: GET
+    path: "/r/:shortCode"
+    auth_required:
+      type: none
+    request_body:
+      content_type: "none"
+      schema: "shortCode in URL path. Reads Referer and User-Agent headers for analytics."
+    response:
+      status_307: "HTTP 307 Temporary Redirect. Location: <originalUrl>"
+      status_404: "{ code: 404, message: 'Short URL not found' }"
+      status_410: "{ code: 410, message: 'Link has expired' }"
+
+  - method: GET
+    path: "/v1/links"
+    auth_required:
+      type: jwt
+      roles: []
+    request_body:
+      content_type: "none"
+      schema: "Query: page (int, default 1), limit (int, 1-100, default 20), sortBy (string), search (string)"
+    response:
+      status_200: "{ results: [{ id, shortCode, shortUrl, originalUrl, title, tags, clickCount, createdAt, expiresAt, isDeleted }], page, limit, totalPages, totalResults }"
+      status_401: "{ code: 401, message: 'Please authenticate' }"
+
+  - method: GET
+    path: "/v1/links/:shortCode"
+    auth_required:
+      type: jwt
+      roles: []
+    request_body:
+      content_type: "none"
+      schema: "shortCode in URL path"
+    response:
+      status_200: "{ id, shortCode, shortUrl, originalUrl, title, tags, customDescription, clickCount, lastAccessedAt, createdAt, updatedAt, expiresAt, isDeleted }"
+      status_401: "{ code: 401, message: 'Please authenticate' }"
+      status_403: "{ code: 403, message: 'You do not have permission to access this resource.' }"
+      status_404: "{ code: 404, message: 'Link not found' }"
+
+  - method: PATCH
+    path: "/v1/links/:shortCode"
+    auth_required:
+      type: jwt
+      roles: []
+    request_body:
+      content_type: "application/json"
+      schema: "{ expiresAt?, title?, tags?, customDescription? } — at least one field required"
+    response:
+      status_200: "{ id, shortCode, shortUrl, originalUrl, title, tags, customDescription, expiresAt, updatedAt }"
+      status_400: "{ code: 400, message: 'expiresAt must be a future date' }"
+      status_401: "{ code: 401, message: 'Please authenticate' }"
+      status_403: "{ code: 403, message: 'You do not have permission to access this resource.' }"
+      status_404: "{ code: 404, message: 'Link not found' }"
+
+  - method: DELETE
+    path: "/v1/links/:shortCode"
+    auth_required:
+      type: jwt
+      roles: []
+    request_body:
+      content_type: "none"
+      schema: "shortCode in URL path"
+    response:
+      status_204: "No content (soft delete successful)"
+      status_401: "{ code: 401, message: 'Please authenticate' }"
+      status_403: "{ code: 403, message: 'You do not have permission to access this resource.' }"
+      status_404: "{ code: 404, message: 'Link not found' }"
+
+  - method: GET
+    path: "/v1/links/:shortCode/analytics"
+    auth_required:
+      type: jwt
+      roles: []
+    request_body:
+      content_type: "none"
+      schema: "Query: startDate (ISO8601), endDate (ISO8601), page (int, default 1), limit (int, 1-100, default 20)"
+    response:
+      status_200: "{ shortCode, totalClicks, clicks: [{ timestamp, referrer, userAgent, ipAddressAnonymized, countryCode, deviceType, browserName }], page, limit, totalPages }"
+      status_401: "{ code: 401, message: 'Please authenticate' }"
+      status_403: "{ code: 403, message: 'Forbidden' }"
+      status_404: "{ code: 404, message: 'Link not found' }"
+
+  - method: GET
+    path: "/v1/links/:shortCode/analytics/export"
+    auth_required:
+      type: jwt
+      roles: []
+    request_body:
+      content_type: "none"
+      schema: "Query: startDate (ISO8601, optional), endDate (ISO8601, optional)"
+    response:
+      status_200: "Content-Type: text/csv. Content-Disposition: attachment; filename='analytics-{shortCode}-{date}.csv'. CSV: timestamp,referrer,userAgent,ipAddressAnonymized,countryCode,deviceType,browserName"
+      status_401: "{ code: 401, message: 'Please authenticate' }"
+      status_403: "{ code: 403, message: 'Forbidden' }"
+      status_404: "{ code: 404, message: 'Link not found' }"
+
+  - method: POST
+    path: "/v1/links/bulk"
+    auth_required:
+      type: jwt
+      roles: []
+    request_body:
+      content_type: "application/json"
+      schema: "{ urls: [{ originalUrl, customCode?, expiresAt?, title?, tags?, customDescription? }] } — 1-1000 items"
+    response:
+      status_202: "{ jobId, status: 'queued', totalRows, message: 'Bulk import queued. Poll GET /v1/links/bulk/{jobId} for status.' }"
+      status_400: "{ code: 400, message: 'urls must contain between 1 and 1000 items' }"
+      status_401: "{ code: 401, message: 'Please authenticate' }"
+
+  - method: GET
+    path: "/v1/links/bulk/:jobId"
+    auth_required:
+      type: jwt
+      roles: []
+    request_body:
+      content_type: "none"
+      schema: "jobId in URL path"
+    response:
+      status_200: "{ jobId, status, totalRows, successCount, failureCount, failedRows: [{ rowIndex, originalUrl, reason }], startedAt, completedAt }"
+      status_401: "{ code: 401, message: 'Please authenticate' }"
+      status_403: "{ code: 403, message: 'Forbidden' }"
+      status_404: "{ code: 404, message: 'Job not found' }"
+
+  - method: GET
+    path: "/v1/links/:shortCode/qr"
+    auth_required:
+      type: none
+    request_body:
+      content_type: "none"
+      schema: "Query: format ('png' or 'svg', default 'png')"
+    response:
+      status_200: "Binary. Content-Type: image/png or image/svg+xml. Content-Disposition: attachment; filename='qr-{shortCode}.{format}'"
+      status_400: "{ code: 400, message: 'Unsupported format. Use png or svg.' }"
+      status_404: "{ code: 404, message: 'Short URL not found' }"
+
+# ─────────────────────────────────────────────────────────────────
+# INTERFACES  (service-layer function signatures)
+# ─────────────────────────────────────────────────────────────────
+interfaces:
+
+  - function_name: normalizeUrl
+    file_path: "src/utils/urlNormalizer.js"
+    signature: "(url: string): string"
+    description: "Validates RFC 3986 format (http/https only), lowercases scheme+host, removes default ports, sorts query params, strips fragment. Returns normalised URL string."
+    throws:
+      - "ApiError(400, 'Invalid URL format')"
+      - "ApiError(400, 'Unsupported URL protocol. Only http and https are allowed.')"
+
+  - function_name: computeUrlHash
+    file_path: "src/utils/urlNormalizer.js"
+    signature: "(normalizedUrl: string): string"
+    description: "Returns 64-char hex SHA-256 of the normalised URL using Node.js crypto."
+    throws: []
+
+  - function_name: generateShortCode
+    file_path: "src/utils/shortCode.js"
+    signature: "(): string"
+    description: "Returns an 8-character NanoID using URL-safe alphabet A-Za-z0-9_-."
+    throws: []
+
+  - function_name: validateShortCode
+    file_path: "src/utils/shortCode.js"
+    signature: "(code: string): boolean"
+    description: "Returns true iff code is 3-20 chars, alphanumeric+hyphens, no leading/trailing hyphens."
+    throws: []
+
+  - function_name: isReservedCode
+    file_path: "src/utils/shortCode.js"
+    signature: "(code: string): boolean"
+    description: "Returns true if code (lowercased) appears in RESERVED_CODES or is all-same-character (e.g., 'aaa')."
+    throws: []
+
+  - function_name: checkUrlThreat
+    file_path: "src/utils/threatCheck.js"
+    signature: "(url: string): Promise<{ isMalicious: boolean, reason: string|null }>"
+    description: "Calls external threat intelligence API (5 s timeout). Fail-closed: throws ApiError(503) on any API failure."
+    throws:
+      - "ApiError(503, 'Threat check service unavailable. Please try again later.')"
+
+  - function_name: generateQRCode
+    file_path: "src/utils/qrCode.js"
+    signature: "(url: string, format: 'png'|'svg'): Promise<Buffer|string>"
+    description: "Generates QR code. Returns Buffer for 'png', SVG string for 'svg'."
+    throws:
+      - "ApiError(400, 'Unsupported format. Use png or svg.')"
+
+  - function_name: createLink
+    file_path: "src/services/link.service.js"
+    signature: "(userId: string, body: { originalUrl, customCode?, expiresAt?, title?, tags?, customDescription? }): Promise<Link>"
+    description: "Normalises URL, checks per-user duplicate, runs threat check, validates/generates shortCode, persists Link."
+    throws:
+      - "ApiError(400, 'Invalid URL format')"
+      - "ApiError(400, 'Short code is reserved. Choose another.')"
+      - "ApiError(400, 'Invalid short code format')"
+      - "ApiError(409, 'URL already shortened')"
+      - "ApiError(409, 'Short code already taken')"
+      - "ApiError(422, 'URL flagged as malicious. Reason: {reason}. Contact support if this is incorrect.')"
+      - "ApiError(503, 'Threat check service unavailable. Please try again later.')"
+
+  - function_name: getLinkByShortCode
+    file_path: "src/services/link.service.js"
+    signature: "(shortCode: string): Promise<Link>"
+    description: "Returns active Link for redirect. Throws 410 if expired, 404 if missing/deleted."
+    throws:
+      - "ApiError(404, 'Short URL not found')"
+      - "ApiError(410, 'Link has expired')"
+
+  - function_name: getLinkDetails
+    file_path: "src/services/link.service.js"
+    signature: "(shortCode: string, userId: string): Promise<Link>"
+    description: "Returns Link and enforces ownership — throws 403 if userId does not match link.userId."
+    throws:
+      - "ApiError(403, 'You do not have permission to access this resource.')"
+      - "ApiError(404, 'Link not found')"
+
+  - function_name: listUserLinks
+    file_path: "src/services/link.service.js"
+    signature: "(userId: string, options: { page, limit, sortBy?, search? }): Promise<PaginateResult<Link>>"
+    description: "Returns paginated non-deleted links owned by userId with optional search."
+    throws: []
+
+  - function_name: updateLink
+    file_path: "src/services/link.service.js"
+    signature: "(shortCode: string, userId: string, updates: { expiresAt?, title?, tags?, customDescription? }): Promise<Link>"
+    description: "Updates allowed metadata fields. Enforces ownership. Rejects past expiresAt with 400."
+    throws:
+      - "ApiError(400, 'expiresAt must be a future date')"
+      - "ApiError(403, 'You do not have permission to access this resource.')"
+      - "ApiError(404, 'Link not found')"
+
+  - function_name: deleteLink
+    file_path: "src/services/link.service.js"
+    signature: "(shortCode: string, userId: string): Promise<void>"
+    description: "Soft-deletes link (isDeleted=true). Analytics preserved. Enforces ownership."
+    throws:
+      - "ApiError(403, 'You do not have permission to access this resource.')"
+      - "ApiError(404, 'Link not found')"
+
+  - function_name: getLinkAnalytics
+    file_path: "src/services/link.service.js"
+    signature: "(shortCode: string, userId: string, options: { startDate?, endDate?, page, limit }): Promise<{ shortCode, totalClicks, clicks, page, limit, totalPages }>"
+    description: "Returns paginated Click records for link. Enforces ownership."
+    throws:
+      - "ApiError(403, 'Forbidden')"
+      - "ApiError(404, 'Link not found')"
+
+  - function_name: exportAnalyticsCSV
+    file_path: "src/services/link.service.js"
+    signature: "(shortCode: string, userId: string, options: { startDate?, endDate? }): Promise<string>"
+    description: "Returns CSV string of all Click records in date range. Enforces ownership."
+    throws:
+      - "ApiError(403, 'Forbidden')"
+      - "ApiError(404, 'Link not found')"
+
+  - function_name: recordClick
+    file_path: "src/services/click.service.js"
+    signature: "(linkId: string, data: { referrer: string, userAgent: string, ip: string }): Promise<void>"
+    description: "Creates Click document with anonymized IP, parsed UA. Atomically increments Link.clickCount."
+    throws: []
+
+  - function_name: bulkImportLinks
+    file_path: "src/services/bulkImport.service.js"
+    signature: "(userId: string, rows: CreateLinkBody[]): Promise<BulkImportJob>"
+    description: "Creates BulkImportJob, iterates rows calling createLink, records per-row results, returns completed job."
+    throws: []
+
+  - function_name: getBulkImportJob
+    file_path: "src/services/bulkImport.service.js"
+    signature: "(jobId: string, userId: string): Promise<BulkImportJob>"
+    description: "Returns BulkImportJob by ID. Enforces userId ownership."
+    throws:
+      - "ApiError(403, 'Forbidden')"
+      - "ApiError(404, 'Job not found')"
+
+# ─────────────────────────────────────────────────────────────────
+# TASKS  (ordered by dependency)
+# ─────────────────────────────────────────────────────────────────
+tasks:
+
+  - task_id: TASK-001
+    title: "Create Link Mongoose model with indexes"
+    files:
+      - "src/models/link.model.js"
+      - "src/models/index.js"
+    req_ids: ["REQ-001", "REQ-005", "REQ-006", "REQ-008", "REQ-011"]
+    acceptance_criteria:
+      - "Schema includes shortCode (String, required, unique, minlength 3, maxlength 20)"
+      - "Schema includes originalUrl (String, required, maxlength 2048)"
+      - "Schema includes urlHash (String, required)"
+      - "Compound unique index { urlHash: 1, userId: 1 } prevents same user shortening same URL twice"
+      - "Schema includes isDeleted (Boolean, default false)"
+      - "Schema includes clickCount (Number, default 0)"
+      - "Schema includes expiresAt (Date, optional, sparse index)"
+      - "Schema includes title, tags, customDescription optional fields"
+      - "toJSON plugin applied (urlHash hidden in API responses)"
+      - "paginate plugin applied (Link.paginate() static method available)"
+      - "Unit test: model saves with required fields only"
+      - "Unit test: duplicate shortCode throws MongoServerError code 11000"
+      - "Unit test: duplicate { urlHash, userId } pair throws MongoServerError code 11000"
+      - "Unit test: same urlHash with different userId saves successfully"
+
+  - task_id: TASK-002
+    title: "Create Click Mongoose model for analytics"
+    files:
+      - "src/models/click.model.js"
+      - "src/models/index.js"
+    req_ids: ["REQ-006"]
+    acceptance_criteria:
+      - "Schema includes linkId (ObjectId, required, ref Link)"
+      - "Schema includes timestamp (Date, default Date.now)"
+      - "Schema includes referrer, userAgent, ipAddressAnonymized, countryCode, deviceType, browserName"
+      - "deviceType has enum [Desktop, Mobile, Tablet, Unknown] with default Unknown"
+      - "Compound index { linkId: 1, timestamp: -1 } created"
+      - "toJSON plugin applied"
+      - "Unit test: Click document saves with required fields"
+
+  - task_id: TASK-003
+    title: "Create BulkImportJob Mongoose model"
+    files:
+      - "src/models/bulkImportJob.model.js"
+      - "src/models/index.js"
+    req_ids: ["REQ-012"]
+    acceptance_criteria:
+      - "Schema includes userId, status (enum: queued/processing/completed/failed), totalRows"
+      - "Schema includes successCount, failureCount, failedRows array"
+      - "Schema includes startedAt, completedAt"
+      - "Index { userId: 1, status: 1 } created"
+      - "toJSON plugin applied"
+      - "Unit test: BulkImportJob saves with required fields and status defaults to 'queued'"
+
+  - task_id: TASK-004
+    title: "Create URL normalizer and short code utilities"
+    files:
+      - "src/utils/urlNormalizer.js"
+      - "src/utils/shortCode.js"
+      - "src/config/config.js"
+    req_ids: ["REQ-001", "REQ-003", "REQ-005", "REQ-009"]
+    acceptance_criteria:
+      - "normalizeUrl throws ApiError(400) for non-http/https protocols (e.g., ftp://example.com)"
+      - "normalizeUrl throws ApiError(400) for bare hostnames without protocol (e.g., 'example.com')"
+      - "normalizeUrl lowercases scheme and host: 'HTTPS://EXAMPLE.COM/Path' → 'https://example.com/Path'"
+      - "normalizeUrl removes port 443 from https URLs and port 80 from http URLs"
+      - "normalizeUrl sorts query params alphabetically: '?z=1&a=2' → '?a=2&z=1'"
+      - "normalizeUrl strips fragment: 'https://example.com/page#section' → 'https://example.com/page'"
+      - "computeUrlHash returns 64-char hex string; same input always produces same output"
+      - "generateShortCode returns 8-char string containing only [A-Za-z0-9_-]"
+      - "validateShortCode returns false for codes shorter than 3 chars"
+      - "validateShortCode returns false for codes longer than 20 chars"
+      - "validateShortCode returns false for codes with leading hyphen (e.g., '-abc')"
+      - "validateShortCode returns false for codes with trailing hyphen (e.g., 'abc-')"
+      - "isReservedCode returns true for 'admin', 'api', 'www', 'r', 'v1', 'docs'"
+      - "isReservedCode returns true for all-same-char patterns: 'aaa', 'bbb', 'zzz'"
+      - "isReservedCode returns false for 'mylink', 'sale2024'"
+      - "config includes threatApiUrl, threatApiKey, baseUrl env var bindings"
+      - "Unit tests cover all 15 cases above"
+
+  - task_id: TASK-005
+    title: "Create threat check utility (fail-closed)"
+    files:
+      - "src/utils/threatCheck.js"
+    req_ids: ["REQ-004"]
+    acceptance_criteria:
+      - "checkUrlThreat calls THREAT_API_URL with Authorization: Bearer THREAT_API_KEY header"
+      - "Returns { isMalicious: false, reason: null } when API responds with clean result"
+      - "Returns { isMalicious: true, reason: 'phishing' } when API flags the URL"
+      - "Throws ApiError(503) when API responds with HTTP 5xx"
+      - "Throws ApiError(503) when axios times out (5000 ms)"
+      - "Throws ApiError(503) when API is unreachable (ECONNREFUSED)"
+      - "Unit tests use jest.mock('axios') to simulate all three failure modes"
+
+  - task_id: TASK-006
+    title: "Create Joi validation schemas for all link endpoints"
+    files:
+      - "src/validations/link.validation.js"
+      - "src/validations/index.js"
+    req_ids: ["REQ-001", "REQ-003", "REQ-008", "REQ-009", "REQ-011", "REQ-012", "REQ-014"]
+    acceptance_criteria:
+      - "createLink rejects missing originalUrl with 400"
+      - "createLink rejects non-URI originalUrl (e.g., 'not-a-url') with 400"
+      - "createLink rejects originalUrl longer than 2048 chars with 400"
+      - "createLink accepts optional customCode matching /^[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]$/"
+      - "createLink rejects expiresAt in the past with 400"
+      - "createLink accepts expiresAt as future ISO8601 datetime"
+      - "updateLink rejects empty body (Joi .min(1) on body object)"
+      - "shortCodeParam rejects shortCode < 3 chars"
+      - "bulkImport rejects urls array with 0 items or > 1000 items"
+      - "getQRCode rejects format values other than 'png' or 'svg'"
+      - "Unit tests for each schema: one valid payload and one invalid per rule"
+
+  - task_id: TASK-007
+    title: "Implement link service (core business logic)"
+    files:
+      - "src/services/link.service.js"
+      - "src/services/index.js"
+    req_ids: ["REQ-001", "REQ-003", "REQ-004", "REQ-005", "REQ-007", "REQ-008", "REQ-009", "REQ-011", "REQ-013"]
+    acceptance_criteria:
+      - "createLink: normalises URL and stores urlHash"
+      - "createLink: throws ApiError(409) with existingShortCode when duplicate (urlHash+userId) found"
+      - "createLink: throws ApiError(422) when checkUrlThreat returns isMalicious=true"
+      - "createLink: propagates ApiError(503) when threat API fails"
+      - "createLink: throws ApiError(400) for reserved customCode"
+      - "createLink: throws ApiError(409) when customCode is taken by another link"
+      - "createLink: auto-generates shortCode using generateShortCode() when no customCode provided"
+      - "getLinkByShortCode: throws ApiError(404) for unknown/deleted shortCode"
+      - "getLinkByShortCode: throws ApiError(410) when expiresAt < now"
+      - "getLinkDetails: throws ApiError(403) when userId does not match link.userId"
+      - "updateLink: throws ApiError(400) when expiresAt <= now"
+      - "deleteLink: sets isDeleted=true; Click records remain in DB"
+      - "listUserLinks: excludes isDeleted=true links from results"
+      - "getLinkAnalytics: queries Click collection with linkId filter"
+      - "exportAnalyticsCSV: returns string with header row and correct columns"
+      - "exportAnalyticsCSV: CSV values with commas are quoted correctly"
+      - "Unit tests use mongodb-memory-server; threat check is mocked via jest.mock"
+
+  - task_id: TASK-008
+    title: "Implement click tracking service"
+    files:
+      - "src/services/click.service.js"
+      - "src/services/index.js"
+    req_ids: ["REQ-006"]
+    acceptance_criteria:
+      - "recordClick creates a Click document in the database"
+      - "IPv4 anonymization: '192.168.1.42' stored as '192.168.1.0'"
+      - "IPv4 anonymization: '10.0.0.255' stored as '10.0.0.0'"
+      - "Link.clickCount incremented by 1 after recordClick"
+      - "Link.lastAccessedAt updated to current timestamp after recordClick"
+      - "Unit test: Click document has expected ipAddressAnonymized value"
+      - "Unit test: Link.clickCount is 1 after first recordClick call"
+
+  - task_id: TASK-009
+    title: "Implement link controller (HTTP handlers)"
+    files:
+      - "src/controllers/link.controller.js"
+      - "src/controllers/index.js"
+    req_ids: ["REQ-001", "REQ-006", "REQ-007", "REQ-008", "REQ-009", "REQ-011", "REQ-012", "REQ-013", "REQ-014"]
+    acceptance_criteria:
+      - "createLink handler returns HTTP 201 with shortUrl = config.baseUrl + '/r/' + shortCode"
+      - "createLink handler returns HTTP 201 with clickCount: 0"
+      - "listUserLinks handler returns HTTP 200 with paginated structure (results, page, limit, totalPages)"
+      - "getLinkDetails handler returns HTTP 200"
+      - "updateLink handler returns HTTP 200 with updated fields"
+      - "deleteLink handler returns HTTP 204 with no body"
+      - "getLinkAnalytics handler returns HTTP 200 with clicks array"
+      - "exportAnalytics handler sets Content-Type: text/csv and Content-Disposition header"
+      - "bulkImport handler returns HTTP 202 with jobId and message"
+      - "getBulkImportStatus handler returns HTTP 200 with job details"
+      - "getQRCode handler sets Content-Type: image/png for format=png"
+      - "getQRCode handler sets Content-Type: image/svg+xml for format=svg"
+      - "All handlers use catchAsync (no try/catch in handlers)"
+
+  - task_id: TASK-010
+    title: "Implement redirect controller"
+    files:
+      - "src/controllers/redirect.controller.js"
+      - "src/controllers/index.js"
+    req_ids: ["REQ-002", "REQ-006", "REQ-008"]
+    acceptance_criteria:
+      - "GET /r/:shortCode returns HTTP 307 with Location set to originalUrl"
+      - "Returns HTTP 404 when shortCode not found"
+      - "Returns HTTP 410 when link has expired"
+      - "clickService.recordClick is called without await (non-blocking)"
+      - "Referrer, User-Agent, and req.ip are passed to recordClick"
+      - "Analytics errors are silently swallowed (no 500 from analytics failure)"
+      - "Integration test: GET /r/:shortCode follows redirect to originalUrl"
+      - "Integration test: GET /r/:expiredCode returns 410"
+
+  - task_id: TASK-011
+    title: "Create link routes with middleware chain"
+    files:
+      - "src/routes/v1/link.route.js"
+      - "src/routes/v1/index.js"
+    req_ids: ["REQ-001", "REQ-007", "REQ-009", "REQ-010", "REQ-011", "REQ-012", "REQ-013", "REQ-014"]
+    acceptance_criteria:
+      - "POST /v1/links: auth(), linkCreationLimiter, validate(createLink), linkController.createLink"
+      - "GET /v1/links: auth(), validate(listUserLinks), linkController.listUserLinks"
+      - "GET /v1/links/:shortCode: auth(), validate(shortCodeParam), linkController.getLinkDetails"
+      - "PATCH /v1/links/:shortCode: auth(), validate(updateLink), linkController.updateLink"
+      - "DELETE /v1/links/:shortCode: auth(), validate(shortCodeParam), linkController.deleteLink"
+      - "GET /v1/links/:shortCode/analytics: auth(), validate(getLinkAnalytics), linkController.getLinkAnalytics"
+      - "GET /v1/links/:shortCode/analytics/export: auth(), validate(exportAnalytics), linkController.exportAnalytics"
+      - "POST /v1/links/bulk: auth(), linkController.bulkImport (bulk route defined BEFORE /:shortCode)"
+      - "GET /v1/links/bulk/:jobId: auth(), linkController.getBulkImportStatus"
+      - "GET /v1/links/:shortCode/qr: validate(getQRCode), linkController.getQRCode (NO auth)"
+      - "v1/index.js: router.use('/links', linkRoute)"
+
+  - task_id: TASK-012
+    title: "Create redirect route and register in app.js"
+    files:
+      - "src/routes/redirect.route.js"
+      - "src/app.js"
+    req_ids: ["REQ-002"]
+    acceptance_criteria:
+      - "GET /r/:shortCode mapped to redirectController.redirectLink in redirect.route.js"
+      - "app.js registers app.use('/r', redirectRoute) BEFORE the v1 API router"
+      - "GET /r/abc123 does not return 404 (route is registered)"
+      - "Integration test: server starts; GET /r/nonexistent returns 404 (not unhandled)"
+
+  - task_id: TASK-013
+    title: "Add per-user rate limiter for link creation"
+    files:
+      - "src/middlewares/rateLimiter.js"
+    req_ids: ["REQ-010"]
+    acceptance_criteria:
+      - "linkCreationLimiter configured: max 100, windowMs 3,600,000 (1 hour)"
+      - "Key function uses req.user.id (not IP)"
+      - "Exceeding limit returns HTTP 429 with Retry-After header (seconds)"
+      - "429 body: { code: 429, message: 'Rate limit exceeded. You can create 100 links per hour. Try again in X seconds.' }"
+      - "Integration test: 101st request within window returns 429 with Retry-After"
+
+  - task_id: TASK-014
+    title: "Implement bulk import service"
+    files:
+      - "src/services/bulkImport.service.js"
+      - "src/services/index.js"
+    req_ids: ["REQ-012"]
+    acceptance_criteria:
+      - "bulkImportLinks creates a BulkImportJob with status 'processing'"
+      - "Iterates all rows calling linkService.createLink for each"
+      - "Per-row ApiError is caught; failedRows entry added with rowIndex and reason"
+      - "successCount and failureCount reflect actual row results"
+      - "Job status set to 'completed' after iteration; completedAt populated"
+      - "getBulkImportJob throws ApiError(403) when userId does not match job.userId"
+      - "Unit test: 3-row import where row index 1 has invalid URL → successCount=2, failureCount=1"
+
+  - task_id: TASK-015
+    title: "Implement analytics CSV export"
+    files:
+      - "src/services/link.service.js"
+    req_ids: ["REQ-013"]
+    acceptance_criteria:
+      - "exportAnalyticsCSV queries Click collection with optional startDate/endDate filter"
+      - "CSV header row: timestamp,referrer,userAgent,ipAddressAnonymized,countryCode,deviceType,browserName"
+      - "Each field is double-quoted if it contains commas or newlines"
+      - "Empty optional fields appear as empty string in CSV (not 'undefined')"
+      - "Controller sets Content-Type: text/csv"
+      - "Controller sets Content-Disposition: attachment; filename='analytics-{shortCode}-YYYY-MM-DD.csv'"
+      - "Unit test: 3 Click records produce CSV with header + 3 data rows"
+
+  - task_id: TASK-016
+    title: "Implement QR code generation"
+    files:
+      - "src/utils/qrCode.js"
+    req_ids: ["REQ-014"]
+    acceptance_criteria:
+      - "generateQRCode(url, 'png') returns a non-empty Buffer"
+      - "generateQRCode(url, 'svg') returns a string starting with '<svg'"
+      - "generateQRCode throws ApiError(400) for format 'jpg' or any unsupported format"
+      - "Controller sends correct Content-Type (image/png or image/svg+xml)"
+      - "Controller sends Content-Disposition: attachment; filename='qr-{shortCode}.{format}'"
+      - "Unit test: PNG Buffer length > 0"
+      - "Unit test: SVG string matches /<svg/i"
+
+  - task_id: TASK-017
+    title: "Integration tests for all 11 acceptance scenarios"
+    files:
+      - "tests/integration/link.test.js"
+      - "tests/integration/redirect.test.js"
+      - "tests/fixtures/link.fixture.js"
+    req_ids: ["REQ-001", "REQ-002", "REQ-003", "REQ-004", "REQ-005", "REQ-006", "REQ-007", "REQ-008", "REQ-009", "REQ-010"]
+    acceptance_criteria:
+      - "SC-001: POST /v1/links returns 201 with shortCode, shortUrl, clickCount=0"
+      - "SC-002: GET /r/:shortCode returns 307 with Location=originalUrl; subsequent analytics query shows clickCount=1"
+      - "SC-003: POST /v1/links with customCode='myawesomelink' returns 201 with that shortCode"
+      - "SC-004: POST /v1/links with future expiresAt returns 201; response includes expiresAt"
+      - "SC-004b: POST /v1/links with past expiresAt returns 400"
+      - "SC-005: GET /r/:shortCode for expired link returns 410"
+      - "SC-006: POST /v1/links with mocked malicious URL returns 422 (threat API mocked via jest.mock)"
+      - "SC-007: POST /v1/links with duplicate originalUrl (same user) returns 409 with existingShortCode"
+      - "SC-008: POST /v1/links with customCode='admin' returns 400"
+      - "SC-009: 101st POST /v1/links within 1 hour returns 429 with Retry-After header"
+      - "SC-010: GET /v1/links/:shortCode for link owned by User A, accessed by User B returns 403"
+      - "SC-011: GET /v1/links/:shortCode without Authorization header returns 401"
+      - "link.fixture.js provides createLink(user, overrides) helper and insertLinks(user, count) helper"
+
+# ─────────────────────────────────────────────────────────────────
+# BUILD ORDER  (implement files in this sequence)
+# ─────────────────────────────────────────────────────────────────
+build_order:
+  - "src/config/config.js"                         # add threatApiUrl, threatApiKey, baseUrl
+  - "src/utils/urlNormalizer.js"                   # normalizeUrl, computeUrlHash
+  - "src/utils/shortCode.js"                       # generateShortCode, validateShortCode, isReservedCode
+  - "src/utils/threatCheck.js"                     # checkUrlThreat (fail-closed)
+  - "src/utils/qrCode.js"                          # generateQRCode
+  - "src/models/link.model.js"                     # Link schema + indexes
+  - "src/models/click.model.js"                    # Click schema + indexes
+  - "src/models/bulkImportJob.model.js"            # BulkImportJob schema
+  - "src/models/index.js"                          # export all models
+  - "src/validations/link.validation.js"           # Joi schemas for link endpoints
+  - "src/validations/index.js"                     # export linkValidation
+  - "src/middlewares/rateLimiter.js"               # add linkCreationLimiter
+  - "src/services/click.service.js"                # recordClick
+  - "src/services/link.service.js"                 # all link business logic
+  - "src/services/bulkImport.service.js"           # bulkImportLinks, getBulkImportJob
+  - "src/services/index.js"                        # export new services
+  - "src/controllers/redirect.controller.js"       # redirectLink
+  - "src/controllers/link.controller.js"           # all link HTTP handlers
+  - "src/controllers/index.js"                     # export new controllers
+  - "src/routes/redirect.route.js"                 # GET /r/:shortCode (no auth)
+  - "src/routes/v1/link.route.js"                  # /v1/links/* routes
+  - "src/routes/v1/index.js"                       # register linkRoute
+  - "src/app.js"                                   # register redirectRoute before v1 router
+  - "tests/fixtures/link.fixture.js"               # test helpers
+  - "tests/integration/redirect.test.js"           # SC-002, SC-005 redirect scenarios
+  - "tests/integration/link.test.js"               # all 11 acceptance scenarios
