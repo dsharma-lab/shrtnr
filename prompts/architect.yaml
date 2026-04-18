@@ -19,6 +19,7 @@ task: |
      - Identify which src/ layer files need to be created or modified (models, services, controllers, routes, middleware, validations, utils)
      - For each component, describe the specific changes required
      - Specify dependencies (what must be built first)
+     - Each component MUST cite the REQ IDs from the spec that it implements (e.g., REQ-001, REQ-005)
 
   2. **Data Model Changes:**
      - For each Mongoose model affected (e.g., Link, Analytics, User, ApiKey), list new/modified fields
@@ -45,7 +46,16 @@ task: |
      - Define Joi validation schemas for request body, query params, and URL params
      - Specify error handling behavior (which ApiError codes to throw)
 
-  6. **Build Order:**
+  6. **Numbered Implementation Tasks:**
+     - Break the full implementation into discrete, ordered tasks (TASK-001, TASK-002, …)
+     - Each task MUST include:
+       - A short title describing the work unit
+       - The file(s) to create or modify
+       - The REQ IDs from the spec that this task satisfies
+       - Acceptance criteria: a numbered list of verifiable conditions that confirm the task is done
+     - Tasks must be ordered by dependency (earlier tasks cannot depend on later ones)
+
+  7. **Build Order:**
      - List files in implementation order
      - Dependencies first (e.g., models before services before controllers)
 
@@ -82,7 +92,13 @@ output_schema:
             type: string
             description: Detailed description of changes
             example: "Create new Link model with fields: originalUrl, shortCode, userId, expiresAt, clickCount, createdAt. Add indexes on (userId, shortCode) and expiresAt."
-        required: [name, layer, file_path, action, changes_required]
+          req_ids:
+            type: array
+            items:
+              type: string
+            description: REQ IDs from the spec that this component satisfies
+            example: ["REQ-001", "REQ-005"]
+        required: [name, layer, file_path, action, changes_required, req_ids]
     data_models:
       type: array
       items:
@@ -200,6 +216,40 @@ output_schema:
               - "ApiError(409, 'Short code already taken')"
               - "ApiError(429, 'Rate limit exceeded')"
         required: [function_name, file_path, signature, description]
+    tasks:
+      type: array
+      description: Ordered implementation tasks with REQ traceability and acceptance criteria
+      items:
+        type: object
+        properties:
+          task_id:
+            type: string
+            example: TASK-001
+          title:
+            type: string
+            example: "Create Link Mongoose model with shortCode, urlHash, and expiry fields"
+          files:
+            type: array
+            items:
+              type: string
+            example: ["src/models/link.model.js"]
+          req_ids:
+            type: array
+            items:
+              type: string
+            description: Spec REQ IDs satisfied by this task
+            example: ["REQ-001", "REQ-005", "REQ-009"]
+          acceptance_criteria:
+            type: array
+            items:
+              type: string
+            description: Verifiable conditions that confirm the task is complete
+            example:
+              - "Link schema includes shortCode (unique, 3-20 chars, indexed)"
+              - "urlHash field is SHA-256 of normalised URL, compound unique index with userId"
+              - "expiresAt is optional DateTime; model query helper filters expired records"
+              - "Unit test: creating two links with same URL for same user throws duplicate error"
+        required: [task_id, title, files, req_ids, acceptance_criteria]
     build_order:
       type: array
       items:
@@ -217,6 +267,7 @@ output_schema:
     - data_models
     - api_contract
     - interfaces
+    - tasks
     - build_order
 
 tags:

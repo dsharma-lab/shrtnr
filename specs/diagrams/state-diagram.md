@@ -3,39 +3,28 @@
 ```mermaid
 stateDiagram-v2
     [*] --> ACTIVE: POST /v1/links
-    
-    ACTIVE --> EXPIRED: Expiration time reached
-    ACTIVE --> DELETED: User deletes link
-    ACTIVE --> ACTIVE: Link accessed (click recorded)
-    
-    EXPIRED --> DELETED: User deletes or cleanup job
-    EXPIRED --> EXPIRED: Link accessed (HTTP 410)
-    
+
+    ACTIVE --> EXPIRED: expiresAt passed
+    ACTIVE --> DELETED: DELETE request
+
+    EXPIRED --> DELETED: DELETE request or cleanup job
+
     DELETED --> [*]
-    
-    note right of ACTIVE
-        Status: Fully functional
-        - Redirect: HTTP 307
-        - Analytics: Recorded
-        - Updateable: Yes
-        - Duration: Until expiresAt (or indefinite)
-    end note
-    
-    note right of EXPIRED
-        Status: No longer accessible
-        - Redirect: HTTP 410 Gone
-        - Analytics: NOT recorded
-        - Updateable: No
-        - Deletable: Yes
-    end note
-    
-    note right of DELETED
-        Status: Soft-deleted
-        - Record: Kept in database
-        - Analytics: Preserved
-        - Redirect: HTTP 404
-        - Retrieval: Not allowed
-    end note
+
+    state ACTIVE {
+        [*] --> Serving
+        Serving --> Serving: GET redirects HTTP 307, click recorded
+    }
+
+    state EXPIRED {
+        [*] --> Gone
+        Gone --> Gone: GET returns HTTP 410, no analytics
+    }
+
+    state DELETED {
+        [*] --> Hidden
+        Hidden --> Hidden: all requests return HTTP 404
+    }
 ```
 
 ## State Transitions & Business Rules
