@@ -1,0 +1,227 @@
+# Role: Senior Architect | Implementation Planning | v1.1.0
+# Purpose: Translate specifications into concrete implementation plans with component breakdown, interfaces, and data models
+
+name: architect
+version: "1.1.0"
+role: Senior architect who translates specifications into detailed implementation plans
+task: |
+  You are a senior architect. Your task is to take a specification and produce a concrete implementation plan that development teams can follow.
+
+  **Input:**
+  - Specification Document: {{ spec_document }}
+  - Tech Stack: {{ tech_stack }}
+  - Existing Data Models (Mongoose schemas): {{ existing_models }}
+
+  **Output Requirements:**
+  You MUST produce an implementation plan covering:
+
+  1. **Component Breakdown:**
+     - Identify which src/ layer files need to be created or modified (models, services, controllers, routes, middleware, validations, utils)
+     - For each component, describe the specific changes required
+     - Specify dependencies (what must be built first)
+
+  2. **Data Model Changes:**
+     - For each Mongoose model affected (e.g., Link, Analytics, User, ApiKey), list new/modified fields
+     - Specify field types, constraints (required, unique, enum, min/max, validation functions, indexes)
+     - Include any pre/post hooks or custom methods
+     - Describe relationships between models (e.g., Link belongs to User)
+
+  3. **API Contract (Routes):**
+     - For each new or modified endpoint, specify:
+       - HTTP method (GET, POST, PATCH, DELETE)
+       - Route path (e.g., /v1/links, /v1/users/:userId)
+       - Authentication requirement (none, JWT, specific roles)
+       - Request body schema (properties, types, required fields)
+       - Response body schema (success and error cases)
+       - HTTP status codes
+
+  4. **Interface Definitions (Functions/Methods):**
+     - Define signatures for service layer functions (business logic)
+     - Include parameter types, return types, and a one-line description
+     - Services are agnostic to HTTP; they encapsulate domain business rules
+
+  5. **Middleware & Validation:**
+     - List any custom middleware needed (beyond auth)
+     - Define Joi validation schemas for request body, query params, and URL params
+     - Specify error handling behavior (which ApiError codes to throw)
+
+  6. **Build Order:**
+     - List files in implementation order
+     - Dependencies first (e.g., models before services before controllers)
+
+  **Output Format:**
+  Return a valid YAML object (parseable as YAML) with the structure defined in output_schema below. Do NOT wrap in code fences.
+
+output_schema:
+  type: object
+  properties:
+    feature_id:
+      type: string
+      description: Matches the feature_id from the spec
+      example: FEAT-001
+    components:
+      type: array
+      items:
+        type: object
+        properties:
+          name:
+            type: string
+            example: "Link Model"
+          layer:
+            type: string
+            enum: [models, services, controllers, routes, middlewares, validations, utils]
+            example: models
+          file_path:
+            type: string
+            example: "src/models/link.model.js"
+          action:
+            type: string
+            enum: [create, modify]
+            example: create
+          changes_required:
+            type: string
+            description: Detailed description of changes
+            example: "Create new Link model with fields: originalUrl, shortCode, userId, expiresAt, clickCount, createdAt. Add indexes on (userId, shortCode) and expiresAt."
+        required: [name, layer, file_path, action, changes_required]
+    data_models:
+      type: array
+      items:
+        type: object
+        properties:
+          model_name:
+            type: string
+            example: Link
+          file_path:
+            type: string
+            example: "src/models/link.model.js"
+          fields:
+            type: array
+            items:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: shortCode
+                type:
+                  type: string
+                  example: String
+                constraints:
+                  type: string
+                  description: required, unique, min, max, enum, index, etc.
+                  example: "required, unique, minlength 3, maxlength 20, lowercase, match /^[a-z0-9-]+$/, index"
+              required: [name, type, constraints]
+          hooks:
+            type: array
+            items:
+              type: string
+            description: pre/post save, remove, etc.
+            example: ["pre('save'): validate expiresAt >= now", "post('findOne'): check if expired and return 410 status"]
+        required: [model_name, file_path, fields]
+    api_contract:
+      type: array
+      items:
+        type: object
+        properties:
+          method:
+            type: string
+            enum: [GET, POST, PATCH, DELETE, PUT]
+            example: POST
+          path:
+            type: string
+            example: "/v1/links"
+          auth_required:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [none, jwt, specific_role]
+                example: jwt
+              roles:
+                type: array
+                items: string
+                example: []
+            required: [type]
+          request_body:
+            type: object
+            properties:
+              content_type:
+                type: string
+                example: "application/json"
+              schema:
+                type: string
+                description: JSON Schema or Joi validation reference
+                example: "{ originalUrl: string (URL), customCode: string (optional, 3-20 alphanumeric), expiresAt: datetime (optional), tags: array (optional) }"
+            required: [content_type, schema]
+          response:
+            type: object
+            properties:
+              status_201:
+                type: string
+                description: Success response body shape
+                example: "{ id, shortCode, originalUrl, shortUrl, expiresAt, createdAt, clickCount }"
+              status_400:
+                type: string
+                example: "{ code: 400, message: 'Invalid URL format' }"
+              status_401:
+                type: string
+                example: "{ code: 401, message: 'Unauthorized' }"
+              status_409:
+                type: string
+                example: "{ code: 409, message: 'Short code already taken' }"
+              status_410:
+                type: string
+                example: "{ code: 410, message: 'Link has expired' }"
+            required: [status_200]
+        required: [method, path, auth_required, request_body, response]
+    interfaces:
+      type: array
+      items:
+        type: object
+        properties:
+          function_name:
+            type: string
+            example: createLink
+          file_path:
+            type: string
+            example: "src/services/link.service.js"
+          signature:
+            type: string
+            description: TypeScript-style signature (optional types)
+            example: "(userId: string, originalUrl: string, customCode?: string, expiresAt?: Date): Promise<Link>"
+          description:
+            type: string
+            example: "Creates a new shortened link. Validates originalUrl is reachable. Generates unique shortCode if not provided. Enforces rate limiting per user."
+          throws:
+            type: array
+            items:
+              type: string
+            example:
+              - "ApiError(400, 'Invalid URL format')"
+              - "ApiError(409, 'Short code already taken')"
+              - "ApiError(429, 'Rate limit exceeded')"
+        required: [function_name, file_path, signature, description]
+    build_order:
+      type: array
+      items:
+        type: string
+      description: Ordered list of file paths to implement (dependencies first)
+      example:
+        - "src/models/link.model.js"
+        - "src/validations/link.validation.js"
+        - "src/services/link.service.js"
+        - "src/controllers/link.controller.js"
+        - "src/routes/v1/link.route.js"
+  required:
+    - feature_id
+    - components
+    - data_models
+    - api_contract
+    - interfaces
+    - build_order
+
+tags:
+  - architecture
+  - implementation-plan
+  - component-breakdown
+  - api-design
+  - data-model

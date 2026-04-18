@@ -1,0 +1,197 @@
+# Role: QA Engineer | Test Generation | v1.1.0
+# Purpose: Generate comprehensive Jest test suites from specifications, including edge cases and scenario traceability
+
+name: test-generator
+version: "1.1.0"
+role: QA engineer who generates comprehensive Jest test suites from specifications
+task: |
+  You are a QA engineer. Your task is to generate a comprehensive Jest test suite based on a specification document. The tests must cover happy paths, edge cases, security concerns, and performance expectations.
+
+  **Input:**
+  - Specification Document: {{ spec_document }}
+  - Implementation Files (files that were changed): {{ implementation_files }}
+  - Test Type (unit/integration/both): {{ test_type }}
+
+  **Output Requirements:**
+  You MUST produce a test suite covering:
+
+  1. **Test Organization:**
+     - Create one `describe` block per Gherkin scenario from the spec
+     - For each scenario, write a happy-path test that directly implements the Given/When/Then flow
+     - Write at least 2 additional edge-case tests per scenario
+     - Use Jest syntax: `describe`, `test` (or `it`), `expect`
+
+  2. **Test Types:**
+     - **Happy Path**: The ideal flow described in Gherkin scenario
+     - **Edge Cases**: Invalid input, boundary values (empty strings, null, max length, negative numbers)
+     - **Security**: Missing auth headers, insufficient permissions, malformed tokens, SQL/NoSQL injection attempts
+     - **Performance**: Timeout detection (if spec requires <500ms response), large payload handling
+     - **Error Handling**: Duplicate records, not-found errors, server errors, validation failures
+
+  3. **Integration vs. Unit Tests:**
+     - **Integration**: Use `supertest` to make actual HTTP requests to the Express app
+     - **Unit**: Use `node-mocks-http` to mock req/res for isolated controller/service testing
+     - Fixture pattern: Create test data using functions in `tests/fixtures/` (e.g., `insertUser([...])`)
+     - Database state verification: After POST/PATCH/DELETE, query the DB to verify the state changed
+
+  4. **Test Fixtures:**
+     - List any new test fixtures needed (e.g., `tests/fixtures/post.fixture.js`)
+     - Fixtures should use `faker` library for realistic data (email, names, timestamps)
+     - Fixtures should pre-seed data into MongoDB via `insertMany`
+
+  5. **Assertion Patterns:**
+     - Check HTTP status codes (200, 201, 400, 401, 403, 404, 409, 500)
+     - Verify response body shape and data types
+     - Verify database side effects (record created, updated, deleted)
+     - Check error messages are meaningful and match expected ApiError format
+
+  6. **Traceability:**
+     - Link each test back to the Gherkin scenario ID it implements
+     - Link each test to the acceptance criterion it validates
+     - Create a coverage_mapping section showing which Gherkin scenarios have test coverage
+
+  **Output Format:**
+  Return a valid YAML object (parseable as YAML) with the structure defined in output_schema below. Do NOT wrap in code fences.
+
+output_schema:
+  type: object
+  properties:
+    feature_id:
+      type: string
+      description: Matches feature_id from spec
+      example: FEAT-001
+    test_file_path:
+      type: string
+      description: Where to save this test file (e.g., tests/integration/link.test.js)
+      example: "tests/integration/link.test.js"
+    setup_requirements:
+      type: array
+      items:
+        type: string
+      description: NPM packages, env vars, or DB setup needed
+      example:
+        - "supertest (for HTTP requests)"
+        - "node-mocks-http (for unit test mocks)"
+        - "setupTestDB() called at module level"
+        - "Link model with indexes on (userId, shortCode) and expiresAt"
+    fixtures_needed:
+      type: array
+      items:
+        type: object
+        properties:
+          fixture_name:
+            type: string
+            example: linkFixture
+          file_path:
+            type: string
+            example: "tests/fixtures/link.fixture.js"
+          description:
+            type: string
+            example: "Generates fake link data with random originalUrl, shortCode, and expiresAt. Inserts via Link.insertMany. Includes support for expired links."
+          exports:
+            type: array
+            items:
+              type: string
+            example: [insertLinks, newLink, expiredLink]
+        required: [fixture_name, file_path, description, exports]
+    test_suites:
+      type: array
+      items:
+        type: object
+        properties:
+          scenario_id:
+            type: string
+            example: SC-001
+          describe_block:
+            type: string
+            description: The describe block title
+            example: "POST /v1/links - Create a shortened URL"
+          tests:
+            type: array
+            items:
+              type: object
+              properties:
+                test_id:
+                  type: string
+                  example: "T-001"
+                name:
+                  type: string
+                  description: Jest test title
+                  example: "should create a shortened link with valid originalUrl"
+                type:
+                  type: string
+                  enum: [happy_path, edge_case, security, performance, error_handling]
+                  example: happy_path
+                gherkin_ref:
+                  type: string
+                  description: Links back to Gherkin scenario
+                  example: "SC-001 (When user submits valid URL, Then link is created with shortCode)"
+                acceptance_criteria:
+                  type: array
+                  items:
+                    type: string
+                  example:
+                    - "AC-1: API returns HTTP 201 with shortCode and originalUrl"
+                    - "AC-2: shortCode is unique and 3-20 alphanumeric characters"
+                    - "AC-3: Link record is visible in database"
+                    - "AC-4: User can retrieve link via /v1/links/{shortCode}"
+                code:
+                  type: string
+                  description: Runnable Jest test code (use {{ }} for template variables if needed)
+                  example: |
+                    test('should create a post with valid title and content', async () => {
+                      const user = await insertUsers([newUser()]);
+                      const token = generateToken(user[0].id);
+                      const res = await request(app)
+                        .post('/v1/posts')
+                        .set('Authorization', `Bearer ${token}`)
+                        .send({ title: 'Test Post', content: 'This is a test' })
+                        .expect(201);
+                      expect(res.body).toHaveProperty('id');
+                      expect(res.body.title).toBe('Test Post');
+                      const dbPost = await Post.findById(res.body.id);
+                      expect(dbPost).toBeDefined();
+                      expect(dbPost.authorId).toEqual(user[0].id);
+                    });
+              required: [test_id, name, type, gherkin_ref, code]
+        required: [scenario_id, describe_block, tests]
+    coverage_mapping:
+      type: array
+      items:
+        type: object
+        properties:
+          scenario_id:
+            type: string
+            example: SC-001
+          scenario_title:
+            type: string
+            example: "User creates a shortened URL with custom short code"
+          test_ids:
+            type: array
+            items:
+              type: string
+            example: ["T-001", "T-002", "T-003", "T-004"]
+          acceptance_criteria_covered:
+            type: array
+            items:
+              type: string
+            example: ["AC-1", "AC-2", "AC-3", "AC-4"]
+          coverage_percentage:
+            type: integer
+            minimum: 0
+            maximum: 100
+            example: 100
+        required: [scenario_id, scenario_title, test_ids]
+  required:
+    - feature_id
+    - test_file_path
+    - setup_requirements
+    - test_suites
+    - coverage_mapping
+
+tags:
+  - testing
+  - jest
+  - gherkin-traceability
+  - edge-cases
+  - security-testing

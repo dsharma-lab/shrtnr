@@ -1,0 +1,298 @@
+---
+feature_id: FEAT-001
+title: "URL Shortener Service - Core Platform"
+version: "1.0.0"
+
+glossary:
+  - term: "RFC 3986"
+    definition: "Internet standard (Uniform Resource Identifier: Generic Syntax) that defines the rules for valid URL format. Examples: valid='https://example.com', invalid='example.com' (missing protocol)."
+
+  - term: "JWT (JSON Web Token)"
+    definition: "A standard way to securely transmit authentication information between client and server. Contains encoded user data + signature. Used for login and access control."
+
+  - term: "HTTP Status Codes"
+    definition: "Three-digit numbers servers send to indicate request result. Examples: 200=OK, 201=Created, 400=Bad Request, 401=Unauthorized, 403=Forbidden, 404=Not Found, 409=Conflict, 410=Gone, 422=Unprocessable Entity, 429=Too Many Requests."
+
+  - term: "Rate Limiting"
+    definition: "Restricting the number of requests a user can make in a time period (e.g., 100 links/hour). Prevents abuse and ensures fair resource usage."
+
+  - term: "Malicious URL"
+    definition: "URLs flagged as dangerous by threat intelligence databases. Includes phishing sites (fake login pages), malware distribution sites, and spam. Detected using external APIs like VirusTotal."
+
+  - term: "Soft Delete"
+    definition: "Marking a record as deleted without physically removing it from the database. Preserves historical data (like analytics) while hiding the record from users."
+
+  - term: "Anonymized IP"
+    definition: "User IP address with the last octet removed (e.g., 192.168.1.0 instead of 192.168.1.42). Protects privacy while allowing geographic analysis."
+
+  - term: "p95 (95th Percentile)"
+    definition: "Performance metric. If p95=100ms, it means 95% of requests complete in ≤100ms. Used to measure real-world performance (ignores extreme outliers)."
+
+  - term: "TTL (Time To Live)"
+    definition: "How long something remains valid. JWT access token TTL=30min means token expires after 30 minutes and user must refresh it."
+
+  - term: "CORS (Cross-Origin Resource Sharing)"
+    definition: "Security policy that controls which websites can access your API. Example: if shrtnr.io only allows requests from app.shrtnr.io, requests from evil.com are blocked."
+
+  - term: "Eventual Consistency"
+    definition: "Analytics data may not be instantly accurate (e.g., click count updates with 1-5 second delay). System prioritizes speed over real-time accuracy."
+
+  - term: "RTO / RPO"
+    definition: "Disaster recovery metrics. RTO=Recovery Time Objective (max downtime allowed, 1 hour). RPO=Recovery Point Objective (max data loss allowed, 1 hour of clicks)."
+
+requirements:
+  - id: REQ-001
+    priority: Critical
+    keyword: MUST
+    statement: "The system MUST accept long URLs (up to 2048 characters) and generate unique short codes (3-20 alphanumeric characters) that redirect to the original URL."
+
+  - id: REQ-002
+    priority: Critical
+    keyword: MUST
+    statement: "The system MUST redirect HTTP GET requests to a short URL (e.g., https://shrtnr.io/abc123) to the original URL with HTTP 301 or 307 status code."
+
+  - id: REQ-003
+    priority: Critical
+    keyword: MUST
+    statement: "The system MUST reject and return HTTP 400 for malformed URLs (invalid format, unsupported protocols, suspicious patterns). URLs MUST match RFC 3986."
+
+  - id: REQ-004
+    priority: Critical
+    keyword: MUST
+    statement: "The system MUST detect and reject URLs flagged as malicious (phishing, malware, spam) using external threat intelligence APIs. Rejected URLs MUST return HTTP 422 with reason in response."
+
+  - id: REQ-005
+    priority: Critical
+    keyword: MUST
+    statement: "The system MUST ensure short code uniqueness. Duplicate creation requests for the same original URL MUST return HTTP 409 (Conflict) with message 'URL already shortened'."
+
+  - id: REQ-006
+    priority: Critical
+    keyword: MUST
+    statement: "The system MUST track analytics for each link: click count, last accessed timestamp, referrer HTTP header, user agent, IP address (anonymized)."
+
+  - id: REQ-007
+    priority: Critical
+    keyword: MUST
+    statement: "The system MUST validate JWT tokens and enforce user ownership: users can only manage their own shortened URLs. Unauthorized access MUST return HTTP 403."
+
+  - id: REQ-008
+    priority: High
+    keyword: SHOULD
+    statement: "The system SHOULD support optional expiration dates. Expired links MUST return HTTP 410 (Gone) and reject further analytics tracking."
+
+  - id: REQ-009
+    priority: High
+    keyword: SHOULD
+    statement: "The system SHOULD allow users to specify custom short codes (instead of auto-generated) if codes are available and follow format rules (3-20 alphanumeric, no reserved words)."
+
+  - id: REQ-010
+    priority: High
+    keyword: SHOULD
+    statement: "The system SHOULD enforce rate limiting: max 100 link creations per user per hour. Rate limit exceeded MUST return HTTP 429 with Retry-After header."
+
+  - id: REQ-011
+    priority: Medium
+    keyword: SHOULD
+    statement: "The system SHOULD support link metadata: title (auto-extracted from URL or user-provided), tags (comma-separated), custom description."
+
+  - id: REQ-012
+    priority: Medium
+    keyword: SHOULD
+    statement: "The system SHOULD support bulk operations: users can import multiple URLs at once (CSV/JSON), with per-URL success/failure feedback."
+
+  - id: REQ-013
+    priority: Medium
+    keyword: SHOULD
+    statement: "The system SHOULD provide analytics exports: users can export click data as CSV for a specified date range."
+
+  - id: REQ-014
+    priority: Low
+    keyword: SHOULD
+    statement: "The system SHOULD generate QR codes for shortened URLs. QR code MUST encode the short URL and be downloadable as PNG/SVG."
+
+scenarios:
+  - id: SC-001
+    title: "Happy Path: User creates a shortened URL with auto-generated short code"
+    given: "An authenticated user with valid access token and a long URL 'https://example.com/products/shoes/winter-sale-2024?category=boots&size=10'"
+    when: "They POST to /v1/links with originalUrl and no customCode specified"
+    then: "API returns HTTP 201 with auto-generated shortCode (e.g., 'xyz789'), shortUrl, originalUrl, createdAt, and clickCount=0. Link is stored in database and assigned to user."
+
+  - id: SC-002
+    title: "Happy Path: User accesses shortened URL and is redirected"
+    given: "A valid shortened link exists in the system: { shortCode: 'abc123', originalUrl: 'https://example.com/page' }"
+    when: "A user/bot makes GET request to https://shrtnr.io/abc123 with Referer header"
+    then: "API returns HTTP 301 with Location header pointing to originalUrl. Analytics record is created: clickCount incremented, lastAccessedAt updated, referrer captured."
+
+  - id: SC-003
+    title: "Happy Path: User creates shortened URL with custom short code"
+    given: "An authenticated user and desired custom code 'myawesomelink' (available, not reserved, 3-20 chars, alphanumeric only)"
+    when: "They POST to /v1/links with originalUrl and customCode='myawesomelink'"
+    then: "API returns HTTP 201 with shortCode='myawesomelink' and all link metadata. Custom code is unique-constraint enforced."
+
+  - id: SC-004
+    title: "Happy Path: User creates shortened URL with expiration date"
+    given: "An authenticated user and expiresAt='2025-12-31T23:59:59Z' (future date)"
+    when: "They POST to /v1/links with originalUrl and expiresAt"
+    then: "API returns HTTP 201. Link is stored with expiration. User can see expiresAt in response."
+
+  - id: SC-005
+    title: "Error Case: User attempts to access expired shortened URL"
+    given: "A shortened link exists but expiresAt is in the past: { shortCode: 'old123', expiresAt: '2020-01-01T00:00:00Z' }"
+    when: "A user makes GET request to https://shrtnr.io/old123"
+    then: "API returns HTTP 410 (Gone) with message 'Link has expired'. No analytics record created. User cannot access original URL."
+
+  - id: SC-006
+    title: "Error Case: User attempts to create a link with invalid/malicious URL"
+    given: "A user attempts to create a link with URL 'https://phishing-site.io/steal-credentials' (flagged as malicious by threat intelligence)"
+    when: "They POST to /v1/links with this URL"
+    then: "API returns HTTP 422 (Unprocessable Entity) with message 'URL flagged as malicious. Reason: phishing attempt. Contact support if this is incorrect.'"
+
+  - id: SC-007
+    title: "Error Case: User submits duplicate URL for shortening"
+    given: "A shortened link already exists: { shortCode: 'abc123', originalUrl: 'https://example.com' } owned by the same user"
+    when: "They POST to /v1/links with the same originalUrl"
+    then: "API returns HTTP 409 (Conflict) with message 'URL already shortened' and existing shortCode in response. No new link created."
+
+  - id: SC-008
+    title: "Error Case: User attempts to create link with reserved/blocked short code"
+    given: "User wants customCode='admin' or 'api' or 'www' (reserved words for system routes)"
+    when: "They POST to /v1/links with customCode='admin'"
+    then: "API returns HTTP 400 with message 'Short code is reserved. Choose another.'"
+
+  - id: SC-009
+    title: "Security Case: User exceeds rate limit on link creation"
+    given: "A user has already created 100 links in the current hour"
+    when: "They attempt to create the 101st link within the same hour"
+    then: "API returns HTTP 429 (Too Many Requests) with Retry-After: 3600 header and message 'Rate limit exceeded. You can create 100 links per hour. Try again in X seconds.'"
+
+  - id: SC-010
+    title: "Error Case: User attempts to access another user's link details"
+    given: "Link exists owned by User A. User B is authenticated with different user_id."
+    when: "User B makes GET request to /v1/links/abc123 to view analytics (owned by User A)"
+    then: "API returns HTTP 403 (Forbidden) with message 'You do not have permission to access this resource.'"
+
+acceptance_criteria:
+  - "REQ-001: API accepts URLs up to 2048 chars and generates unique 3-20 char alphanumeric short codes"
+  - "REQ-002: GET /:shortCode returns 301/307 redirect with Location header pointing to original URL"
+  - "REQ-003: Invalid URLs (non-RFC3986, unsupported protocols) are rejected with HTTP 400"
+  - "REQ-004: Malicious URLs are detected and rejected with HTTP 422 including reason"
+  - "REQ-005: Duplicate URL creation returns HTTP 409 (Conflict) for same URL by same user"
+  - "REQ-006: Click analytics captured on each redirect: count, timestamp, referrer, user agent, anonymized IP"
+  - "REQ-007: JWT token validation enforced; users can only manage own links; unauthorized returns 403"
+  - "REQ-008: Optional expiresAt field supported; expired links return 410; analytics not tracked"
+  - "REQ-009: Custom short codes allowed if available, format validated, reserved words blocked"
+  - "REQ-010: Rate limiting: 100 links/user/hour; exceeding returns 429 with Retry-After"
+  - "REQ-011: Link metadata (title, tags, description) stored and retrievable"
+  - "REQ-012: Bulk import endpoint accepts CSV/JSON; returns per-row status"
+  - "REQ-013: Analytics export endpoint returns CSV with click data for date range"
+  - "REQ-014: QR code generation for short URL; downloadable as PNG/SVG"
+
+non_functional:
+  performance: |
+    Redirect performance SHALL be <100ms at p95 globally for accessing short URLs.
+    Link creation endpoint SHALL respond in <500ms at p95.
+    Analytics query endpoint (click history) SHALL respond in <1000ms at p95.
+    Database indexes on (userId, shortCode) and expiresAt are REQUIRED.
+    Redirect queries SHOULD be cached (CDN/Redis) to achieve <100ms latency.
+
+  security: |
+    URLs MUST be validated against RFC 3986 before storage.
+    Malicious URL detection MUST use external threat intelligence API (VirusTotal, URLhaus, or equivalent).
+    Rate limiting MUST be enforced per user_id, not IP (to prevent false positives from proxies).
+    Custom short codes MUST NOT allow sequential guessing: blocked codes include 3-char patterns like 'aaa', 'bbb', etc.
+    User IPs in analytics MUST be anonymized (store last octet as 0, e.g., 192.168.1.0).
+    JWT tokens MUST be validated on every request. Access token TTL: 30 minutes. Refresh token TTL: 7 days.
+    HTTPS MUST be enforced; HTTP requests MUST redirect to HTTPS.
+    CORS MUST be restricted to known origins or disabled if SPA is same-origin.
+
+  scalability: |
+    System MUST support 10 million+ shortened links in the platform.
+    System MUST handle 10,000 concurrent GET (redirect) requests per second.
+    System MUST handle 100 concurrent POST (link creation) requests per second.
+    Database sharding/partitioning SHOULD be considered if single DB becomes bottleneck.
+    Click analytics MUST be eventually consistent; real-time accuracy not required (async processing acceptable).
+    Bulk import operations (REQ-012) SHOULD be queued as background jobs; users polled for completion status.
+
+  reliability: |
+    Shortened links MUST persist indefinitely until expiration date (if set).
+    Link deletion MUST be soft-delete (mark as deleted, keep analytics history).
+    Analytics data MUST NOT be lost during link deletion.
+    System MUST have 99.9% uptime SLA during business hours.
+    Database backups MUST occur at least daily.
+    Disaster recovery time objective (RTO): 1 hour. Recovery point objective (RPO): 1 hour.
+
+api_contract:
+  endpoints:
+    - method: POST
+      path: /v1/links
+      operation_id: createLink
+      summary: "Create a shortened URL"
+      description: "Authenticated endpoint to create a new shortened URL. User can specify custom short code or allow auto-generation. Validates URL format, checks for malicious content, and enforces rate limits."
+      auth: jwt
+
+    - method: GET
+      path: /v1/:shortCode
+      operation_id: redirectLink
+      summary: "Redirect to original URL"
+      description: "Public endpoint to redirect a shortened URL to the original. Tracks analytics (clicks, referrer, user agent, anonymized IP). Returns 410 if link is expired."
+      auth: none
+
+    - method: GET
+      path: /v1/links/:shortCode
+      operation_id: getLinkDetails
+      summary: "Get link details and metadata"
+      description: "Authenticated endpoint. Retrieve link metadata (original URL, creation date, expiration, title, tags). Only link owner can access."
+      auth: jwt
+
+    - method: PATCH
+      path: /v1/links/:shortCode
+      operation_id: updateLink
+      summary: "Update link metadata"
+      description: "Authenticated endpoint. Update link expiration date, title, tags, or description. Only link owner can update."
+      auth: jwt
+
+    - method: DELETE
+      path: /v1/links/:shortCode
+      operation_id: deleteLink
+      summary: "Delete a shortened link"
+      description: "Authenticated endpoint. Soft-delete a link. Analytics history is preserved. Link cannot be accessed after deletion."
+      auth: jwt
+
+    - method: GET
+      path: /v1/links/:shortCode/analytics
+      operation_id: getLinkAnalytics
+      summary: "Get detailed analytics for a link"
+      description: "Authenticated endpoint. Retrieve click history, referrer breakdown, user agent breakdown, geographic data. Supports date range filtering and pagination."
+      auth: jwt
+
+    - method: GET
+      path: /v1/links
+      operation_id: listUserLinks
+      summary: "List all links owned by user"
+      description: "Authenticated endpoint. Paginated list of links created by user. Sorted by creation date (newest first). Supports search, filtering, and custom sorting."
+      auth: jwt
+
+    - method: POST
+      path: /v1/links/bulk
+      operation_id: bulkImportLinks
+      summary: "Bulk import URLs"
+      description: "Authenticated endpoint. Import multiple URLs at once via CSV or JSON file. Returns import job ID. Processing is async; users can poll for completion status."
+      auth: jwt
+
+    - method: GET
+      path: /v1/links/:shortCode/qr
+      operation_id: getQRCode
+      summary: "Generate QR code for shortened URL"
+      description: "Public endpoint. Get a QR code image (PNG or SVG) encoding the shortened URL. Useful for marketing and sharing."
+      auth: none
+
+version_history:
+  - version: "1.0.0"
+    date: "2024-04-18"
+    description: "Initial specification for URL Shortener Service Core Platform"
+    changes:
+      - "14 requirements covering core functionality, analytics, security, and rate limiting"
+      - "10 Gherkin scenarios covering happy paths, error cases, edge cases, and security scenarios"
+      - "9 API endpoints with full request/response contracts"
+      - "Non-functional requirements for performance, security, scalability, and reliability"
