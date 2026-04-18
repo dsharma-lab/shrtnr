@@ -15,10 +15,10 @@ stateDiagram-v2
     
     note right of ACTIVE
         Status: Fully functional
-        - Redirect: HTTP 301
+        - Redirect: HTTP 307
         - Analytics: Recorded
         - Updateable: Yes
-        - Duration: Until expiresAt or 24h
+        - Duration: Until expiresAt (or indefinite)
     end note
     
     note right of EXPIRED

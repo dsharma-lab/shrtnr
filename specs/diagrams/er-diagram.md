@@ -4,8 +4,9 @@
 erDiagram
     USER ||--o{ LINK : creates
     USER ||--o{ REFRESH_TOKEN : has
+    USER ||--o{ BULK_IMPORT_JOB : initiates
     LINK ||--o{ CLICK : generates
-    LINK ||--o{ BULK_IMPORT_JOB : included_in
+    BULK_IMPORT_JOB ||--o{ LINK : produces
 
     USER {
         ObjectId id PK "Unique user identifier"
@@ -24,6 +25,7 @@ erDiagram
         ObjectId id PK "Unique link identifier"
         string shortCode UK "Unique short code (3-20 chars)"
         string originalUrl "The long URL being shortened"
+        string urlHash UK "SHA-256 of normalised URL for fast duplicate detection"
         ObjectId userId FK "Link owner"
         string title "Optional user-provided title"
         array tags "Optional tags for categorization"
@@ -85,7 +87,7 @@ erDiagram
 - Designed for eventual consistency (updates lag by seconds)
 
 **Indexes Required:**
-- Link: unique(shortCode), index(userId, shortCode), index(expiresAt), index(isDeleted)
+- Link: unique(shortCode), unique(urlHash + userId) for per-user duplicate detection, index(userId), index(expiresAt), index(isDeleted)
 - Click: index(linkId, timestamp), index(timestamp)
 - User: unique(email)
 - RefreshToken: index(userId, expiresAt)

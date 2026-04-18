@@ -44,12 +44,12 @@ requirements:
   - id: REQ-001
     priority: Critical
     keyword: MUST
-    statement: "The system MUST accept long URLs (up to 2048 characters) and generate unique short codes (3-20 alphanumeric characters) that redirect to the original URL."
+    statement: "The system MUST accept long URLs (up to 2048 characters) and generate unique short codes (3-20 characters, alphanumeric and hyphens allowed, no leading/trailing hyphens) that redirect to the original URL."
 
   - id: REQ-002
     priority: Critical
     keyword: MUST
-    statement: "The system MUST redirect HTTP GET requests to a short URL (e.g., https://shrtnr.io/abc123) to the original URL with HTTP 301 or 307 status code."
+    statement: "The system MUST redirect HTTP GET requests to a short URL (e.g., https://shrtnr.io/r/abc123) to the original URL with HTTP 307 (Temporary Redirect) to ensure analytics are tracked on every visit. Redirect routes MUST use the /r/ prefix to avoid route conflicts with API paths."
 
   - id: REQ-003
     priority: Critical
@@ -59,12 +59,12 @@ requirements:
   - id: REQ-004
     priority: Critical
     keyword: MUST
-    statement: "The system MUST detect and reject URLs flagged as malicious (phishing, malware, spam) using external threat intelligence APIs. Rejected URLs MUST return HTTP 422 with reason in response."
+    statement: "The system MUST detect and reject URLs flagged as malicious (phishing, malware, spam) using external threat intelligence APIs. Rejected URLs MUST return HTTP 422 with reason in response. If the threat intelligence API is unavailable, the system MUST fail closed (reject the request with HTTP 503) rather than fail open, to prevent accidental distribution of malicious links."
 
   - id: REQ-005
     priority: Critical
     keyword: MUST
-    statement: "The system MUST ensure short code uniqueness. Duplicate creation requests for the same original URL MUST return HTTP 409 (Conflict) with message 'URL already shortened'."
+    statement: "The system MUST ensure short code uniqueness. The system MUST store a SHA-256 hash (urlHash) of the normalised original URL for efficient duplicate detection. Duplicate creation requests for the same original URL by the same user MUST return HTTP 409 (Conflict) with the existing shortCode. Different users shortening the same URL each receive their own independent short code."
 
   - id: REQ-006
     priority: Critical
@@ -84,7 +84,7 @@ requirements:
   - id: REQ-009
     priority: High
     keyword: SHOULD
-    statement: "The system SHOULD allow users to specify custom short codes (instead of auto-generated) if codes are available and follow format rules (3-20 alphanumeric, no reserved words)."
+    statement: "The system SHOULD allow users to specify custom short codes (instead of auto-generated) if codes are available and follow format rules (3-20 characters, alphanumeric and hyphens allowed, no leading/trailing hyphens, no reserved words). Auto-generated codes SHALL use NanoID (URL-safe alphabet, 8 characters) to guarantee uniqueness at scale."
 
   - id: REQ-010
     priority: High
@@ -121,8 +121,8 @@ scenarios:
   - id: SC-002
     title: "Happy Path: User accesses shortened URL and is redirected"
     given: "A valid shortened link exists in the system: { shortCode: 'abc123', originalUrl: 'https://example.com/page' }"
-    when: "A user/bot makes GET request to https://shrtnr.io/abc123 with Referer header"
-    then: "API returns HTTP 301 with Location header pointing to originalUrl. Analytics record is created: clickCount incremented, lastAccessedAt updated, referrer captured."
+    when: "A user/bot makes GET request to https://shrtnr.io/r/abc123 with Referer header"
+    then: "API returns HTTP 307 (Temporary Redirect) with Location header pointing to originalUrl. Analytics record is created: clickCount incremented, lastAccessedAt updated, referrer captured. HTTP 307 is used (not 301) so browsers do not cache the redirect and every visit is tracked."
 
   - id: SC-003
     title: "Happy Path: User creates shortened URL with custom short code"
@@ -134,7 +134,13 @@ scenarios:
     title: "Happy Path: User creates shortened URL with expiration date"
     given: "An authenticated user and expiresAt='2025-12-31T23:59:59Z' (future date)"
     when: "They POST to /v1/links with originalUrl and expiresAt"
-    then: "API returns HTTP 201. Link is stored with expiration. User can see expiresAt in response."
+    then: "API returns HTTP 201. Link is stored with expiration. Response includes expiresAt timestamp."
+
+  - id: SC-004b
+    title: "Edge Case: User provides expiration date in the past"
+    given: "An authenticated user and expiresAt='2020-01-01T00:00:00Z' (past date)"
+    when: "They POST to /v1/links with originalUrl and this expiresAt"
+    then: "API returns HTTP 400 (Bad Request) with message 'expiresAt must be a future date'. Link is NOT created."
 
   - id: SC-005
     title: "Error Case: User attempts to access expired shortened URL"
@@ -171,6 +177,12 @@ scenarios:
     given: "Link exists owned by User A. User B is authenticated with different user_id."
     when: "User B makes GET request to /v1/links/abc123 to view analytics (owned by User A)"
     then: "API returns HTTP 403 (Forbidden) with message 'You do not have permission to access this resource.'"
+
+  - id: SC-011
+    title: "Security Case: Unauthenticated request to protected endpoint"
+    given: "No Authorization header is present in the request"
+    when: "A client makes GET request to /v1/links/abc123 (or any /v1/links/* endpoint) without a JWT token"
+    then: "API returns HTTP 401 (Unauthorized) with message 'Please authenticate'. This is distinct from 403 (wrong user) — 401 means no token provided at all."
 
 acceptance_criteria:
   - "REQ-001: API accepts URLs up to 2048 chars and generates unique 3-20 char alphanumeric short codes"
@@ -232,10 +244,10 @@ api_contract:
       auth: jwt
 
     - method: GET
-      path: /v1/:shortCode
+      path: /r/:shortCode
       operation_id: redirectLink
       summary: "Redirect to original URL"
-      description: "Public endpoint to redirect a shortened URL to the original. Tracks analytics (clicks, referrer, user agent, anonymized IP). Returns 410 if link is expired."
+      description: "Public endpoint to redirect a shortened URL to the original. Uses /r/ prefix to avoid route conflicts with /v1/links/* API paths. Returns HTTP 307 (not 301) so every visit is tracked. Tracks analytics (clicks, referrer, user agent, anonymized IP). Returns 410 if link is expired, 404 if not found."
       auth: none
 
     - method: GET

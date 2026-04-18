@@ -25,7 +25,7 @@ task: |
 
   2. **Gherkin Scenarios** (Given/When/Then format):
      - Write at least ONE happy-path scenario
-     - Write at least TWO edge-case scenarios (invalid input, auth failures, boundary conditions, shrtnr-specific edge cases)
+     - Write at least TWO edge-case scenarios (invalid input, auth failures, boundary conditions, domain-specific edge cases)
      - Each scenario must be independently executable and realistic to shrtnr use cases
      - Format: Given [precondition], When [action], Then [outcome]
 
